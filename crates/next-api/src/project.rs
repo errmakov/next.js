@@ -66,7 +66,7 @@ use turbopack_core::{
     },
     module::{Module, Modules},
     module_graph::{
-        GraphEntries, ModuleGraph, SingleModuleGraph, VisitedModules,
+        GraphEntries, ModuleGraph, ModuleGraphOptions, SingleModuleGraph, VisitedModules,
         binding_usage_info::{
             BindingUsageInfo, OptionBindingUsageInfo, compute_binding_usage_info,
         },
@@ -1482,8 +1482,11 @@ impl Project {
             ModuleGraph::from_graphs(
                 vec![SingleModuleGraph::new_with_entry(
                     ChunkGroupEntry::Entry(vec![entry]),
-                    /* include_traced */ *self.should_write_nft_manifests().await?,
-                    /* include_binding_usage */ self.next_mode().await?.is_production(),
+                    ModuleGraphOptions {
+                        include_idents: self.next_mode().await?.is_production(),
+                        include_traced: *self.should_write_nft_manifests().await?,
+                        include_binding_usage: self.next_mode().await?.is_production(),
+                    },
                 )],
                 None,
             )
@@ -1509,8 +1512,11 @@ impl Project {
                 vec![SingleModuleGraph::new_with_entries(
                     GraphEntries::from_chunk_groups(vec![ChunkGroupEntry::Entry(entries)])
                         .resolved_cell(),
-                    /* include_traced */ *self.should_write_nft_manifests().await?,
-                    /* include_binding_usage */ self.next_mode().await?.is_production(),
+                    ModuleGraphOptions {
+                        include_idents: self.next_mode().await?.is_production(),
+                        include_traced: *self.should_write_nft_manifests().await?,
+                        include_binding_usage: self.next_mode().await?.is_production(),
+                    },
                 )],
                 None,
             )
@@ -1837,7 +1843,7 @@ impl Project {
         let matching: FxHashMap<ResolvedVc<Box<dyn Module>>, &'static str> = module_graph
             .iter_nodes()
             .map(async |node| {
-                let ident = node.ident().await?;
+                let ident = module_graph.module_ident(node).await?;
                 let path = &ident.path.path;
                 for &(feature, suffix) in FEATURE_MODULE_PATH_SUFFIXES {
                     if path.ends_with(suffix) {
@@ -1876,7 +1882,7 @@ impl Project {
         let parent_source_keys = pairs
             .into_iter()
             .map(async |(feature, parent)| {
-                let ident = parent.ident().await?;
+                let ident = module_graph.module_ident(parent).await?;
                 let key = (
                     ident.path.path.clone(),
                     ident.query.clone(),
@@ -2668,10 +2674,19 @@ async fn whole_app_module_graph_operation(
         let next_mode = project.next_mode();
         let should_trace = *project.should_write_nft_manifests().await?;
         let should_read_binding_usage = next_mode.await?.is_production();
+        let graph_options = ModuleGraphOptions {
+            // Store each module's `AssetIdent` in the graph nodes for the whole-app production
+            // graph. The build-only consumers of this graph (`project_feature_usage`,
+            // NFT tracing) need idents for many modules; storing them once here lets
+            // those consumers read from the in-memory graph instead of each fanning out
+            // a tracked `module.ident()` read per module.
+            include_idents: should_read_binding_usage,
+            include_traced: should_trace,
+            include_binding_usage: should_read_binding_usage,
+        };
         let base_single_module_graph = SingleModuleGraph::new_with_entries(
             project.get_all_entries().to_resolved().await?,
-            should_trace,
-            should_read_binding_usage,
+            graph_options,
         );
         let base_visited_modules = VisitedModules::from_graph(base_single_module_graph);
 
@@ -2699,8 +2714,7 @@ async fn whole_app_module_graph_operation(
         let additional_module_graph = SingleModuleGraph::new_with_entries_visited(
             additional_entries,
             base_visited_modules,
-            should_trace,
-            should_read_binding_usage,
+            graph_options,
         );
 
         if !span.is_disabled() {
