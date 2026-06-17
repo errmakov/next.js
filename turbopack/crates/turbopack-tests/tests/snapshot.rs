@@ -469,6 +469,9 @@ async fn run_test_operation(resource: RcStr) -> Result<Vc<FileSystemPath>> {
             .resolved_cell(),
         ModuleGraphOptions {
             include_binding_usage: true,
+            // `compute_side_effect_free_module_info` (run below via `compute_binding_usage_info`
+            // when removing unused imports) reads `side_effects` from the graph node.
+            include_side_effects: options.remove_unused_imports,
             ..Default::default()
         },
     );

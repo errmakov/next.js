@@ -1479,13 +1479,19 @@ impl Project {
         entry: ResolvedVc<Box<dyn Module>>,
     ) -> Result<Vc<ModuleGraph>> {
         Ok(if *self.per_page_module_graph().await? {
+            let is_production = self.next_mode().await?.is_production();
+            let turbopack_remove_unused_imports = *self
+                .next_config()
+                .turbopack_remove_unused_imports(self.next_mode())
+                .await?;
             ModuleGraph::from_graphs(
                 vec![SingleModuleGraph::new_with_entry(
                     ChunkGroupEntry::Entry(vec![entry]),
                     ModuleGraphOptions {
-                        include_idents: self.next_mode().await?.is_production(),
+                        include_idents: is_production,
+                        include_side_effects: turbopack_remove_unused_imports,
                         include_traced: *self.should_write_nft_manifests().await?,
-                        include_binding_usage: self.next_mode().await?.is_production(),
+                        include_binding_usage: is_production,
                     },
                 )],
                 None,
@@ -1502,6 +1508,11 @@ impl Project {
         evaluatable_assets: Vc<EvaluatableAssets>,
     ) -> Result<Vc<ModuleGraph>> {
         Ok(if *self.per_page_module_graph().await? {
+            let is_production = self.next_mode().await?.is_production();
+            let turbopack_remove_unused_imports = *self
+                .next_config()
+                .turbopack_remove_unused_imports(self.next_mode())
+                .await?;
             let entries = evaluatable_assets
                 .await?
                 .iter()
@@ -1513,9 +1524,10 @@ impl Project {
                     GraphEntries::from_chunk_groups(vec![ChunkGroupEntry::Entry(entries)])
                         .resolved_cell(),
                     ModuleGraphOptions {
-                        include_idents: self.next_mode().await?.is_production(),
+                        include_idents: is_production,
+                        include_side_effects: turbopack_remove_unused_imports,
                         include_traced: *self.should_write_nft_manifests().await?,
-                        include_binding_usage: self.next_mode().await?.is_production(),
+                        include_binding_usage: is_production,
                     },
                 )],
                 None,
@@ -2674,6 +2686,10 @@ async fn whole_app_module_graph_operation(
         let next_mode = project.next_mode();
         let should_trace = *project.should_write_nft_manifests().await?;
         let should_read_binding_usage = next_mode.await?.is_production();
+        let turbopack_remove_unused_imports = *project
+            .next_config()
+            .turbopack_remove_unused_imports(next_mode)
+            .await?;
         let graph_options = ModuleGraphOptions {
             // Store each module's `AssetIdent` in the graph nodes for the whole-app production
             // graph. The build-only consumers of this graph (`project_feature_usage`,
@@ -2681,6 +2697,9 @@ async fn whole_app_module_graph_operation(
             // those consumers read from the in-memory graph instead of each fanning out
             // a tracked `module.ident()` read per module.
             include_idents: should_read_binding_usage,
+            // Store each module's `side_effects()` so the side-effect-free aggregation reads it
+            // from the graph. Only needed (and only run) when tree-shaking unused imports.
+            include_side_effects: turbopack_remove_unused_imports,
             include_traced: should_trace,
             include_binding_usage: should_read_binding_usage,
         };
@@ -2691,11 +2710,6 @@ async fn whole_app_module_graph_operation(
         let base_visited_modules = VisitedModules::from_graph(base_single_module_graph);
 
         let base = ModuleGraph::from_graphs(vec![base_single_module_graph], None);
-
-        let turbopack_remove_unused_imports = *project
-            .next_config()
-            .turbopack_remove_unused_imports(next_mode)
-            .await?;
 
         let base = if turbopack_remove_unused_imports {
             // TODO suboptimal that we do compute_binding_usage_info twice (once for the base

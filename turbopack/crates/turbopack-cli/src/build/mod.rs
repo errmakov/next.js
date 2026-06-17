@@ -320,6 +320,10 @@ async fn build_internal(
             .resolved_cell(),
         ModuleGraphOptions {
             include_binding_usage: true,
+            // `compute_binding_usage_info(_, true)` below runs
+            // `compute_side_effect_free_module_info`, which reads `side_effects` from
+            // the graph node.
+            include_side_effects: true,
             ..Default::default()
         },
     );

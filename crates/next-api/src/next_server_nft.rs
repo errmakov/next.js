@@ -110,6 +110,7 @@ impl Asset for ServerNftJsonAsset {
                 GraphEntries::new(vec![], self.entries().owned().await?).resolved_cell(),
                 ModuleGraphOptions {
                     include_idents: true,
+                    include_side_effects: false,
                     include_traced: true,
                     include_binding_usage: false,
                 },
