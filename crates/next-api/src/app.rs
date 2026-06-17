@@ -894,6 +894,11 @@ impl AppProject {
                 .next_config()
                 .turbopack_remove_unused_imports(next_mode)
                 .await?;
+            let scope_hoisting = *self
+                .project
+                .next_config()
+                .turbo_scope_hoisting(next_mode)
+                .await?;
             let graph_options = ModuleGraphOptions {
                 // NFT asset creation relies on the idents
                 include_idents: should_trace,
@@ -901,6 +906,9 @@ impl AppProject {
                 // `compute_side_effect_free_module_info` (via `compute_binding_usage_info` below),
                 // which reads it from the node and bails if absent.
                 include_side_effects: remove_unused_imports,
+                // Store `is_mergeable()` when scope hoisting is enabled: module merging reads it
+                // from the node and bails if absent.
+                include_mergeable: scope_hoisting,
                 include_traced: should_trace,
                 include_binding_usage: should_read_binding_usage,
             };

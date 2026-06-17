@@ -324,6 +324,9 @@ async fn build_internal(
             // `compute_side_effect_free_module_info`, which reads `side_effects` from
             // the graph node.
             include_side_effects: true,
+            // Module merging (driven by `scope_hoist` in the chunking context below) reads
+            // `is_mergeable` from the graph node and bails if absent.
+            include_mergeable: scope_hoist,
             ..Default::default()
         },
     );

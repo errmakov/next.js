@@ -27,7 +27,7 @@ use turbo_tasks::{
 use turbo_tasks_fs::FileSystemPath;
 
 use crate::{
-    chunk::{AsyncModuleInfo, ChunkingContext, ChunkingType, TracedMode},
+    chunk::{AsyncModuleInfo, ChunkingContext, ChunkingType, MergeableModule, TracedMode},
     ident::AssetIdent,
     issue::{ImportTracer, ImportTraces, Issue},
     module::{Module, ModuleSideEffects},
@@ -296,7 +296,7 @@ impl GraphEntries {
 #[turbo_tasks::task_input]
 #[derive(Debug, Copy, Clone, Default, PartialEq, Eq, Hash, TraceRawVcs, Encode, Decode)]
 pub struct ModuleGraphOptions {
-    /// Eagerly resolve and store each module's `iden()` in its graph node, so consumers that
+    /// Eagerly resolve and store each module's `ident()` in its graph node, so consumers that
     /// need idents for many modules can read them from the in-memory graph instead of each fanning
     /// out a `module.ident()` turbo-task read per module. Only worth enabling for graphs with such
     /// consumers (e.g. the whole-app production graph).
@@ -309,6 +309,19 @@ pub struct ModuleGraphOptions {
     /// [`compute_side_effect_free_module_info`]:
     /// crate::module_graph::side_effect_module_info::compute_side_effect_free_module_info
     pub include_side_effects: bool,
+    /// Eagerly resolve and store each module's `MergeableModule::is_mergeable()` `Vc` in its graph
+    /// node, so module merging (scope hoisting) reads it from the in-memory graph instead of
+    /// fanning out a `module.is_mergeable()` turbo-task launch per module. Required by
+    /// [`compute_merged_modules`]: that pass `bail!`s on graphs built without this. Should be
+    /// enabled wherever the chunking context has module merging enabled (`turbo_scope_hoisting`).
+    ///
+    /// When set, every `Module` node stores `Some`: the module's real `is_mergeable()` for types
+    /// that implement [`MergeableModule`], or a resolved `false` for types that don't (so `None`
+    /// unambiguously means "this graph wasn't built with `include_mergeable`").
+    ///
+    /// [`compute_merged_modules`]: crate::module_graph::merged_modules::compute_merged_modules
+    /// [`MergeableModule`]: crate::chunk::MergeableModule
+    pub include_mergeable: bool,
     /// Whether to walk `ChunkingType::Traced` references.
     pub include_traced: bool,
     /// Whether to read `ModuleReference::binding_usage()`.
@@ -372,6 +385,7 @@ impl SingleModuleGraph {
                     emit_spans,
                     options.include_idents,
                     options.include_side_effects,
+                    options.include_mergeable,
                     e,
                     is_traced,
                 )
@@ -412,6 +426,7 @@ impl SingleModuleGraph {
                         ident,
                         is_self_async,
                         side_effects,
+                        is_mergeable,
                         // Transient: only used by the builder to format span names.
                         span_ident: _,
                     } => (
@@ -421,6 +436,7 @@ impl SingleModuleGraph {
                             ident,
                             is_self_async,
                             side_effects,
+                            is_mergeable,
                         },
                         1,
                     ),
@@ -1803,6 +1819,14 @@ pub enum SingleModuleGraphNode {
         /// and `bail!`s when it is `None`; that pass only runs under
         /// `turbopack_remove_unused_imports`, where we set the bit.
         side_effects: Option<ResolvedVc<ModuleSideEffects>>,
+        /// The module's resolved `MergeableModule::is_mergeable()` `Vc`, eagerly resolved when the
+        /// graph was built with `include_mergeable`. When the bit is set this is `Some` for
+        /// *every* `Module` node — the real `is_mergeable()` for types implementing
+        /// `MergeableModule`, or a resolved `false` for types that don't — so `None`
+        /// unambiguously means the graph wasn't built with `include_mergeable`.
+        /// `compute_merged_modules` reads it tracked and `bail!`s on `None`; that pass
+        /// only runs when the chunking context enables module merging.
+        is_mergeable: Option<ResolvedVc<bool>>,
     },
     // Models a module that is referenced but has already been visited by an earlier graph.
     VisitedModule {
@@ -1849,6 +1873,17 @@ impl SingleModuleGraphNode {
         }
     }
 
+    /// The eagerly-resolved `is_mergeable()` `Vc`, if this is a `Module` node from a graph built
+    /// with `include_mergeable`. `Copy`. When the graph collected mergeability this is `Some` for
+    /// every `Module` node (a resolved `false` for non-`MergeableModule` types). `None` for
+    /// `VisitedModule` nodes and for graphs built without mergeable storage.
+    pub fn is_mergeable_resolved(&self) -> Option<ResolvedVc<bool>> {
+        match self {
+            SingleModuleGraphNode::Module { is_mergeable, .. } => *is_mergeable,
+            SingleModuleGraphNode::VisitedModule { .. } => None,
+        }
+    }
+
     pub fn target_idx(&self, direction: Direction) -> Option<GraphNodeIndex> {
         match self {
             SingleModuleGraphNode::VisitedModule { idx, .. } => match direction {
@@ -1888,6 +1923,10 @@ enum SingleModuleGraphBuilderNode {
         /// (`include_side_effects`); `None` otherwise. Excluded from `Hash`/`Eq` — determined by
         /// `module`.
         side_effects: Option<ResolvedVc<ModuleSideEffects>>,
+        /// The module's resolved `is_mergeable()` `Vc` (or a resolved `false` for non-mergeable
+        /// types), resolved when the graph stores them (`include_mergeable`); `None` otherwise.
+        /// Excluded from `Hash`/`Eq` — determined by `module`.
+        is_mergeable: Option<ResolvedVc<bool>>,
         /// The module's ident read as a `ReadRef`, populated only when `emit_spans` so [`span`]
         /// can format the span name synchronously. Transient (never reaches the graph
         /// node) and excluded from `Hash`/`Eq`.
@@ -1961,6 +2000,7 @@ impl SingleModuleGraphBuilderNode {
         emit_spans: bool,
         include_idents: bool,
         include_side_effects: bool,
+        include_mergeable: bool,
         module: ResolvedVc<Box<dyn Module>>,
         is_traced: bool,
     ) -> Result<Self> {
@@ -1983,6 +2023,20 @@ impl SingleModuleGraphBuilderNode {
             is_self_async: module.is_self_async().to_resolved().await?,
             side_effects: if include_side_effects {
                 Some(module.side_effects().to_resolved().await?)
+            } else {
+                None
+            },
+            // When collecting mergeability, store `Some` for *every* module so that `None` at the
+            // node level unambiguously means "graph not built with `include_mergeable`". Types that
+            // implement `MergeableModule` get their real `is_mergeable()`; others get a resolved
+            // `false` (the interned `false` cell, so this is cheap and deduped).
+            is_mergeable: if include_mergeable {
+                Some(
+                    match ResolvedVc::try_downcast::<Box<dyn MergeableModule>>(module) {
+                        Some(mergeable) => mergeable.is_mergeable().to_resolved().await?,
+                        None => Vc::<bool>::cell(false).to_resolved().await?,
+                    },
+                )
             } else {
                 None
             },
@@ -2039,6 +2093,7 @@ impl Visit<SingleModuleGraphBuilderNode, RefData> for SingleModuleGraphBuilder<'
         let ModuleGraphOptions {
             include_idents,
             include_side_effects,
+            include_mergeable,
             include_traced,
             include_binding_usage,
         } = self.options;
@@ -2091,6 +2146,7 @@ impl Visit<SingleModuleGraphBuilderNode, RefData> for SingleModuleGraphBuilder<'
                             emit_spans,
                             include_idents,
                             include_side_effects,
+                            include_mergeable,
                             target,
                             is_traced || ty.is_traced(),
                         )

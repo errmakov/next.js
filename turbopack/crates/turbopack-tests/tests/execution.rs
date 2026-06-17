@@ -519,6 +519,9 @@ async fn run_test_operation(prepared_test: ResolvedVc<PreparedTest>) -> Result<V
             // `compute_side_effect_free_module_info` (run below via `compute_binding_usage_info`
             // when removing unused imports) reads `side_effects` from the graph node.
             include_side_effects: options.remove_unused_imports,
+            // Module merging (driven by `scope_hoisting` in the chunking context below) reads
+            // `is_mergeable` from the graph node and bails if absent.
+            include_mergeable: options.scope_hoisting,
             ..Default::default()
         },
     );
