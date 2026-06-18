@@ -1,32 +1,32 @@
 //! Aggregated HMR: one [`VersionState`] covering every chunk under a target's
-//! root, so the dev server can subscribe once instead of per chunk.
+//! root, so the dev server subscribes once instead of per chunk.
 //!
 //! [`VersionState`]: turbopack_core::version::VersionState
 
 use std::sync::Arc;
 
 use anyhow::Result;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use turbo_rcstr::RcStr;
-use turbo_tasks::{FxIndexMap, ReadRef, ResolvedVc, TraitRef, TryJoinIterExt, Vc};
+use turbo_tasks::{
+    FxIndexMap, NonLocalValue, ReadRef, ResolvedVc, TraitRef, TryJoinIterExt, Vc,
+    debug::ValueDebugFormat, trace::TraceRawVcs,
+};
 use turbo_tasks_fs::FileSystemPath;
 use turbo_tasks_hash::{Xxh3Hash64Hasher, encode_base64};
 use turbopack_core::version::{
     NotFoundVersion, PartialUpdate, Update, Version, VersionState, VersionedContent,
 };
 
-use crate::versioned_content_map::VersionedContentMap;
+use crate::{project::HmrTarget, versioned_content_map::VersionedContentMap};
 
-/// One chunk's contribution to an [`AggregateHmrVersion`]: its output path and
-/// the versioned content backing it.
 pub struct HmrChunkWithContent {
     pub path: RcStr,
     pub content: ResolvedVc<Box<dyn VersionedContent>>,
 }
 
-/// Whether an emitted chunk participates in HMR. Source map (`.map`) files do
-/// not: their content fully rewrites on any source change, which would force
-/// per-chunk diffs to escalate to `Total`.
+/// Whether an emitted chunk participates in HMR. `.map` files don't: their
+/// content rewrites on any source change, forcing per-chunk diffs to `Total`.
 pub fn is_hmr_eligible_chunk(name: &str) -> bool {
     !name.ends_with(".map")
 }
@@ -69,22 +69,21 @@ impl Version for AggregateHmrVersion {
 }
 
 impl AggregateHmrVersion {
-    /// Snapshots every HMR-eligible chunk under `root` in `map` into a new
-    /// [`Version`]. Returns a [`NotFoundVersion`] when no chunks exist yet
-    /// (e.g. before any endpoints have been written).
+    /// Snapshots every HMR-eligible chunk under `root` in `map` for `target`.
+    /// Returns [`NotFoundVersion`] when no chunks exist yet.
     pub async fn from_map(
         map: Vc<VersionedContentMap>,
         root: &FileSystemPath,
+        target: HmrTarget,
     ) -> Result<Vc<Box<dyn Version>>> {
-        let chunks = map.hmr_chunks_in_path(root).await?;
+        let chunks = map.hmr_chunks_in_path(root, target).await?;
         if chunks.is_empty() {
             return Ok(Vc::upcast(NotFoundVersion::new()));
         }
         Ok(Vc::upcast(Self::from_chunks(&chunks).await?))
     }
 
-    /// Snapshots each [`HmrChunkWithContent`]'s [`Version`] into a new
-    /// [`AggregateHmrVersion`].
+    /// Snapshots each chunk's [`Version`] into a new [`AggregateHmrVersion`].
     pub async fn from_chunks(chunks: &[HmrChunkWithContent]) -> Result<Vc<Self>> {
         let versions = chunks
             .iter()
@@ -126,14 +125,12 @@ pub fn merge_ecmascript_merged_update(
     }
 }
 
-/// Builds an `Update::Partial` whose instruction is a combined
-/// `EcmascriptMergedUpdate` covering `entries` and `chunks`. Empty maps are
-/// omitted so an empty `entries`/`chunks` field never appears in the payload.
+/// Builds an `Update::Partial` with a combined `EcmascriptMergedUpdate`
+/// instruction. Empty maps are omitted so they never appear in the payload.
 ///
-/// Passing empty maps produces an instruction with only `type:
-/// "EcmascriptMergedUpdate"`, used to advance `VersionState` to `to` without
-/// the JS consumer applying anything: it sees a `partial` event with nothing
-/// to apply and short-circuits.
+/// With empty maps, produces an instruction with only `type:
+/// "EcmascriptMergedUpdate"` — used to advance `VersionState` to `to` without
+/// the JS consumer applying anything.
 pub fn merged_partial_update(
     to: TraitRef<Box<dyn Version>>,
     entries: FxHashMap<String, serde_json::Value>,
@@ -162,37 +159,119 @@ pub fn merged_partial_update(
     })
 }
 
+/// A single chunk list's contribution to an aggregated client HMR tick.
+#[derive(Debug, Clone, PartialEq, Eq, TraceRawVcs, NonLocalValue, ValueDebugFormat)]
+pub struct ClientChunkListUpdate {
+    /// Chunk list path relative to the client root. Used as `resource.path`
+    /// by the browser's HMR dispatcher.
+    pub path: RcStr,
+    /// Per-chunk-list update kind. The instruction is kept as
+    /// `Arc<serde_json::Value>` so it can be relayed to napi without rebuilding.
+    pub kind: ClientChunkListUpdateKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, TraceRawVcs, NonLocalValue, ValueDebugFormat)]
+pub enum ClientChunkListUpdateKind {
+    /// Restart: the browser must reload to recover (Total/Missing).
+    Restart,
+    Partial {
+        #[turbo_tasks(trace_ignore)]
+        instruction: Arc<serde_json::Value>,
+    },
+}
+
+/// Aggregated client HMR tick: every chunk list with a non-empty diff, plus
+/// the aggregate `to` version to advance [`VersionState`] to. `to` is
+/// computed alongside `updates` so it participates in invalidation with them.
+#[turbo_tasks::value(serialization = "skip", shared)]
+pub struct ClientHmrUpdates {
+    pub updates: Vec<ClientChunkListUpdate>,
+    #[turbo_tasks(trace_ignore)]
+    pub to: TraitRef<Box<dyn Version>>,
+}
+
 /// Per-chunk [`Update`]s computed against an `AggregateHmrVersion` snapshot.
-/// `has_new_chunks` is true when the current snapshot contains chunks absent
-/// from `from` (e.g. a new endpoint was written); callers decide whether that
-/// affects the batch shape.
+/// Used by both server and client aggregate flows; each post-processes the
+/// per-chunk results into its target-specific shape.
 pub struct DiffResult {
     pub chunk_updates: Vec<(RcStr, ReadRef<Update>)>,
+    /// Chunks present in the current snapshot but absent from `from`. The
+    /// server reports a non-`None` Partial when new chunks appear; the client
+    /// ignores this (the runtime require()s new chunk lists on demand).
     pub has_new_chunks: bool,
+    /// Chunk list paths present in `from` but absent from the current
+    /// snapshot. The client emits a per-resource `Restart` for each so the
+    /// browser clears stale issues/state for deleted chunk lists. The server
+    /// ignores this (a `Total` restart is already escalated when any chunk
+    /// needs `Total`/`Missing`).
+    pub deleted_chunks: Vec<RcStr>,
+}
+
+pub struct AggregateHmrSnapshot {
+    pub chunks: Vec<HmrChunkWithContent>,
+    pub to_ref: TraitRef<Box<dyn Version>>,
+    pub diff: DiffResult,
+}
+
+/// Shared prologue for server and client HMR ticks. Lists every chunk under
+/// `root` for `target`, builds the aggregate `to` version via
+/// [`AggregateHmrVersion::from_map`], and diffs against `from`.
+///
+/// When no chunks exist yet, `to_ref` is a [`NotFoundVersion`] and `diff` is
+/// empty so the consumer can short-circuit.
+pub async fn snapshot_aggregate_hmr(
+    map: Vc<VersionedContentMap>,
+    root: &FileSystemPath,
+    target: HmrTarget,
+    from: Vc<VersionState>,
+) -> Result<AggregateHmrSnapshot> {
+    let chunks = map.hmr_chunks_in_path(root, target).await?;
+    let to_ref = AggregateHmrVersion::from_map(map, root, target)
+        .await?
+        .into_trait_ref()
+        .await?;
+    let diff = diff_chunks_against(&chunks, from).await?;
+    Ok(AggregateHmrSnapshot {
+        chunks,
+        to_ref,
+        diff,
+    })
 }
 
 /// Diffs each chunk against `from`'s [`AggregateHmrVersion`] snapshot, if any.
-/// When `from` doesn't downcast to an aggregate version (e.g. the seed
-/// transition), the returned `chunk_updates` is empty.
+/// When `from` doesn't downcast to an aggregate version (the seed transition),
+/// `chunk_updates` is empty.
 pub async fn diff_chunks_against(
     chunks: &[HmrChunkWithContent],
     from: Vc<VersionState>,
 ) -> Result<DiffResult> {
-    if chunks.is_empty() {
-        return Ok(DiffResult {
-            chunk_updates: Vec::new(),
-            has_new_chunks: false,
-        });
-    }
     let from_resolved = from.get().to_resolved().await?;
     let Some(from_aggregate) = ResolvedVc::try_downcast_type::<AggregateHmrVersion>(from_resolved)
     else {
         return Ok(DiffResult {
             chunk_updates: Vec::new(),
             has_new_chunks: false,
+            deleted_chunks: Vec::new(),
         });
     };
     let from_aggregate = from_aggregate.await?;
+
+    let current_paths: FxHashSet<RcStr> = chunks.iter().map(|c| c.path.clone()).collect();
+
+    let deleted_chunks = from_aggregate
+        .versions
+        .keys()
+        .filter(|path| !current_paths.contains(*path))
+        .cloned()
+        .collect();
+
+    if chunks.is_empty() {
+        return Ok(DiffResult {
+            chunk_updates: Vec::new(),
+            has_new_chunks: false,
+            deleted_chunks,
+        });
+    }
 
     let mut has_new_chunks = false;
     let chunk_updates = chunks
@@ -213,5 +292,6 @@ pub async fn diff_chunks_against(
     Ok(DiffResult {
         chunk_updates,
         has_new_chunks,
+        deleted_chunks,
     })
 }

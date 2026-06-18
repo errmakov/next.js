@@ -8,6 +8,7 @@ use turbo_tasks::{
     TryJoinIterExt, Vc, debug::ValueDebugFormat, trace::TraceRawVcs, turbobail,
 };
 use turbo_tasks_fs::{FileContent, FileSystemPath};
+use turbopack_browser::ecmascript::EcmascriptDevChunkListContent;
 use turbopack_core::{
     asset::{Asset, AssetContent},
     output::{ExpandedOutputAssets, OptionOutputAsset, OutputAsset},
@@ -15,7 +16,10 @@ use turbopack_core::{
     version::OptionVersionedContent,
 };
 
-use crate::aggregate_hmr::{HmrChunkWithContent, is_hmr_eligible_chunk};
+use crate::{
+    aggregate_hmr::{HmrChunkWithContent, is_hmr_eligible_chunk},
+    project::HmrTarget,
+};
 
 #[derive(
     Clone, TraceRawVcs, PartialEq, Eq, ValueDebugFormat, Debug, NonLocalValue, Encode, Decode,
@@ -90,19 +94,24 @@ impl VersionedContentMap {
         .resolved_cell()
     }
 
-    /// Lists every HMR-eligible chunk under `root` paired with its current
-    /// [`VersionedContent`]. See [`is_hmr_eligible_chunk`] for the eligibility
-    /// rule.
+    /// Lists every HMR-eligible chunk under `root` with its current
+    /// [`VersionedContent`].
+    ///
+    /// For [`HmrTarget::Client`], entries are filtered to those that downcast
+    /// to [`EcmascriptDevChunkListContent`] — the only shape the browser HMR
+    /// runtime can dispatch. The server runtime applies any HMR-eligible
+    /// chunk, so no downcast is required.
     ///
     /// Redirect assets are excluded: they have no file content to hash, so
     /// [`VersionedAssetContent::version`] would bail with "not a file".
     ///
     /// Not a `#[turbo_tasks::function]` because the per-chunk content fetch
-    /// already participates in the task graph; callers cache the aggregate at
-    /// their own granularity.
+    /// already participates in the task graph; callers cache the aggregate
+    /// at their own granularity.
     pub async fn hmr_chunks_in_path(
         self: Vc<Self>,
         root: &FileSystemPath,
+        target: HmrTarget,
     ) -> Result<Vec<HmrChunkWithContent>> {
         let this = self.await?;
         let paths: Vec<FileSystemPath> = {
@@ -129,6 +138,14 @@ impl VersionedContentMap {
                     return Ok(None);
                 }
                 let content = asset.versioned_content().to_resolved().await?;
+                // For the client target, only EcmascriptDevChunkListContent
+                // entries can be dispatched by the browser HMR runtime.
+                if matches!(target, HmrTarget::Client)
+                    && ResolvedVc::try_downcast_type::<EcmascriptDevChunkListContent>(content)
+                        .is_none()
+                {
+                    return Ok(None);
+                }
                 Ok(Some(HmrChunkWithContent {
                     path: name,
                     content,
@@ -276,23 +293,6 @@ impl VersionedContentMap {
         }
 
         Ok(Vc::cell(None))
-    }
-
-    #[turbo_tasks::function]
-    pub async fn keys_in_path(&self, root: FileSystemPath) -> Result<Vc<Vec<RcStr>>> {
-        let keys = {
-            let map = &self.map_path_to_op.get().0;
-            map.keys().cloned().collect::<Vec<_>>()
-        };
-        let keys = keys
-            .into_iter()
-            .map(|path| {
-                let root = root.clone();
-                async move { Ok(root.get_path_to(&path).map(RcStr::from)) }
-            })
-            .try_flat_join()
-            .await?;
-        Ok(Vc::cell(keys))
     }
 
     #[turbo_tasks::function]
