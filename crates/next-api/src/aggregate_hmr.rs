@@ -1,3 +1,8 @@
+//! Aggregated HMR: one [`VersionState`] covering every chunk under a target's
+//! root, so the dev server can subscribe once instead of per chunk.
+//!
+//! [`VersionState`]: turbopack_core::version::VersionState
+
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -12,16 +17,22 @@ use turbopack_core::version::{
 
 use crate::versioned_content_map::VersionedContentMap;
 
+/// One chunk's contribution to an [`AggregateHmrVersion`]: its output path and
+/// the versioned content backing it.
 pub struct HmrChunkWithContent {
     pub path: RcStr,
     pub content: ResolvedVc<Box<dyn VersionedContent>>,
 }
 
+/// Whether an emitted chunk participates in HMR. Source map (`.map`) files do
+/// not: their content fully rewrites on any source change, which would force
+/// per-chunk diffs to escalate to `Total`.
 pub fn is_hmr_eligible_chunk(name: &str) -> bool {
     !name.ends_with(".map")
 }
 
-/// Per-chunk versions keyed by path
+/// Per-chunk versions keyed by path. `id()` hashes sorted entries so it's
+/// stable across `FxIndexMap` iteration order. Mirrors `EcmascriptDevChunkListVersion`.
 #[turbo_tasks::value(serialization = "skip", shared)]
 pub struct AggregateHmrVersion {
     #[turbo_tasks(trace_ignore)]
@@ -58,6 +69,9 @@ impl Version for AggregateHmrVersion {
 }
 
 impl AggregateHmrVersion {
+    /// Snapshots every HMR-eligible chunk under `root` in `map` into a new
+    /// [`Version`]. Returns a [`NotFoundVersion`] when no chunks exist yet
+    /// (e.g. before any endpoints have been written).
     pub async fn from_map(
         map: Vc<VersionedContentMap>,
         root: &FileSystemPath,
@@ -69,6 +83,8 @@ impl AggregateHmrVersion {
         Ok(Vc::upcast(Self::from_chunks(&chunks).await?))
     }
 
+    /// Snapshots each [`HmrChunkWithContent`]'s [`Version`] into a new
+    /// [`AggregateHmrVersion`].
     pub async fn from_chunks(chunks: &[HmrChunkWithContent]) -> Result<Vc<Self>> {
         let versions = chunks
             .iter()
@@ -88,6 +104,8 @@ impl AggregateHmrVersion {
     }
 }
 
+/// Unions one chunk's `EcmascriptMergedUpdate` into the combined `{entries, chunks}`.
+/// Both maps are keyed by globally-unique ids, so plain insertion is safe.
 pub fn merge_ecmascript_merged_update(
     combined_entries: &mut FxHashMap<String, serde_json::Value>,
     combined_chunks: &mut FxHashMap<String, serde_json::Value>,
