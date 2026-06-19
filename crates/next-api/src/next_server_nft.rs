@@ -109,8 +109,7 @@ impl Asset for ServerNftJsonAsset {
             vec![SingleModuleGraph::new_with_entries(
                 GraphEntries::new(vec![], self.entries().owned().await?).resolved_cell(),
                 ModuleGraphOptions {
-                    include_idents: true,
-                    // NFT tracing only; this graph never runs side-effect aggregation or merging.
+                    include_ident_strings: false,
                     include_side_effects: false,
                     include_mergeable: false,
                     include_traced: true,

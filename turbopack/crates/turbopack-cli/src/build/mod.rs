@@ -327,6 +327,9 @@ async fn build_internal(
             // Module merging (driven by `scope_hoist` in the chunking context below) reads
             // `is_mergeable` from the graph node and bails if absent.
             include_mergeable: scope_hoist,
+            // `get_global_module_id_strategy` below reads each module's `ident_string` from the
+            // graph node; collect it so it doesn't fan out a `to_string()` per module.
+            include_ident_strings: true,
             ..Default::default()
         },
     );

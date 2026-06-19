@@ -589,17 +589,12 @@ pub async fn map_server_actions(
         .await?
         .iter_reachable_nodes()?
         .map(async |node| {
-            let SingleModuleGraphNode::Module { module, .. } = node else {
+            let SingleModuleGraphNode::Module { module, ident, .. } = node else {
                 // VisitedModule nodes were handled in their owning graph.
                 return Ok(None);
             };
             // TODO: compare module contexts instead?
-            // Prefer the eagerly-resolved ident stored on the node (production graphs build with
-            // `include_idents`); fall back to `module.ident()` for graphs that don't store it.
-            let ident = match node.ident_resolved() {
-                Some(ident) => ident.await?,
-                None => module.ident().await?,
-            };
+            let ident = ident.await?;
             let layer = match ident.layer.as_ref() {
                 Some(layer) if layer.name() == "app-rsc" || layer.name() == "app-edge-rsc" => {
                     ActionLayer::Rsc

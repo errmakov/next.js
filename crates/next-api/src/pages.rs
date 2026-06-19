@@ -735,10 +735,9 @@ impl PageEndpoint {
                 .next_config()
                 .turbo_scope_hoisting(next_mode)
                 .await?;
-            // Store idents: NFT tracing reads per-page graphs via `module_ident`, which requires
-            // them (and bails otherwise).
+            // ident strings aren't needed here (module-id strategy uses the whole-app graph).
             let graph_options = ModuleGraphOptions {
-                include_idents: should_read_binding_usage,
+                include_ident_strings: false,
                 // Store `side_effects()` when tree-shaking unused imports: the per-page graph runs
                 // `compute_side_effect_free_module_info` (via `compute_binding_usage_info` below),
                 // which reads it from the node and bails if absent.

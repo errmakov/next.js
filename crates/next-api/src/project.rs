@@ -1492,7 +1492,9 @@ impl Project {
                 vec![SingleModuleGraph::new_with_entry(
                     ChunkGroupEntry::Entry(vec![entry]),
                     ModuleGraphOptions {
-                        include_idents: is_production,
+                        // Per-page graphs never run the module-id strategy (that uses the whole-app
+                        // graph), so no ident strings are needed here.
+                        include_ident_strings: false,
                         include_side_effects: turbopack_remove_unused_imports,
                         include_mergeable: scope_hoisting,
                         include_traced: *self.should_write_nft_manifests().await?,
@@ -1533,7 +1535,9 @@ impl Project {
                     GraphEntries::from_chunk_groups(vec![ChunkGroupEntry::Entry(entries)])
                         .resolved_cell(),
                     ModuleGraphOptions {
-                        include_idents: is_production,
+                        // Per-page graphs never run the module-id strategy (that uses the whole-app
+                        // graph), so no ident strings are needed here.
+                        include_ident_strings: false,
                         include_side_effects: turbopack_remove_unused_imports,
                         include_mergeable: scope_hoisting,
                         include_traced: *self.should_write_nft_manifests().await?,
@@ -2705,12 +2709,10 @@ async fn whole_app_module_graph_operation(
             .turbo_scope_hoisting(next_mode)
             .await?;
         let graph_options = ModuleGraphOptions {
-            // Store each module's `AssetIdent` in the graph nodes for the whole-app production
-            // graph. The build-only consumers of this graph (`project_feature_usage`,
-            // NFT tracing) need idents for many modules; storing them once here lets
-            // those consumers read from the in-memory graph instead of each fanning out
-            // a tracked `module.ident()` read per module.
-            include_idents: should_read_binding_usage,
+            // Store each module's `ident_string()` in production so the deterministic module-id
+            // strategy (`get_global_module_id_strategy`, which runs only on this whole-app graph)
+            // reads it from the graph instead of fanning out a `to_string()` per module.
+            include_ident_strings: should_read_binding_usage,
             // Store each module's `side_effects()` so the side-effect-free aggregation reads it
             // from the graph. Only needed (and only run) when tree-shaking unused imports.
             include_side_effects: turbopack_remove_unused_imports,

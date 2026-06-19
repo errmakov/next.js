@@ -296,11 +296,16 @@ impl GraphEntries {
 #[turbo_tasks::task_input]
 #[derive(Debug, Copy, Clone, Default, PartialEq, Eq, Hash, TraceRawVcs, Encode, Decode)]
 pub struct ModuleGraphOptions {
-    /// Eagerly resolve and store each module's `ident()` in its graph node, so consumers that
-    /// need idents for many modules can read them from the in-memory graph instead of each fanning
-    /// out a `module.ident()` turbo-task read per module. Only worth enabling for graphs with such
-    /// consumers (e.g. the whole-app production graph).
-    pub include_idents: bool,
+    /// Eagerly resolve and store each module's `ident_string()` `Vc` in its graph node, so the
+    /// module-id strategy reads it from the in-memory graph instead of fanning out a
+    /// `module.ident_string()` (i.e. `ident().to_string()`) turbo-task launch per module. Only the
+    /// whole-app/CLI-build graphs that run [`get_global_module_id_strategy`] need it; other graphs
+    /// leave it off to avoid the per-module `to_string` resolve.
+    ///
+    /// (`ident()` itself is always collected — see [`SingleModuleGraphNode::Module::ident`].)
+    ///
+    /// [`get_global_module_id_strategy`]: (crate `turbopack`) `global_module_ids`
+    pub include_ident_strings: bool,
     /// Eagerly resolve and store each module's `side_effects()` `Vc` in its graph node, so the
     /// side-effect-free aggregation reads it from the in-memory graph instead of fanning out a
     /// `module.side_effects()` turbo-task launch per module. Required by
@@ -383,7 +388,7 @@ impl SingleModuleGraph {
             .map(|(e, is_traced)| {
                 SingleModuleGraphBuilderNode::new_module(
                     emit_spans,
-                    options.include_idents,
+                    options.include_ident_strings,
                     options.include_side_effects,
                     options.include_mergeable,
                     e,
@@ -424,6 +429,7 @@ impl SingleModuleGraph {
                         module,
                         is_traced: _,
                         ident,
+                        ident_string,
                         is_self_async,
                         side_effects,
                         is_mergeable,
@@ -434,6 +440,7 @@ impl SingleModuleGraph {
                         SingleModuleGraphNode::Module {
                             module,
                             ident,
+                            ident_string,
                             is_self_async,
                             side_effects,
                             is_mergeable,
@@ -741,11 +748,11 @@ impl ModuleGraphImportTracer {
     async fn path_to_modules(&self) -> Result<Vc<PathToModulesMap>> {
         let graph = self.graph.await?;
         let graph = &*graph;
-        // Prefer the node's eagerly-resolved ident. The import tracer is emitted for every graph —
-        // including dev graphs built without `include_idents` — so fall back to `module.ident()`
-        // for any module whose node ident is absent. Either way the ident `ResolvedVc` is read with
-        // a tracked `.await?`: the producing task was resolved at graph construction (for stored
-        // idents), so the read is cheap while still correctly depending on the value.
+        // Read each module's eagerly-resolved ident from its node (idents are always collected).
+        // The ident `ResolvedVc` is read with a tracked `.await?`: the producing task was resolved
+        // at graph construction, so the read is cheap while still correctly depending on the value.
+        // `module.ident()` is a defensive fallback — `graph.modules` only maps to `Module` nodes,
+        // which always carry an ident.
         let path_and_modules = graph
             .modules
             .iter()
@@ -1152,26 +1159,34 @@ impl ModuleGraphSnapshot {
         self.graphs.iter().flat_map(|g| g.iter_nodes())
     }
 
-    /// Returns a module's resolved `AssetIdent` `Vc`, preferring the eagerly-resolved ident stored
-    /// on the node (graphs built with [`ModuleGraphOptions::include_idents`]) and falling back to
-    /// `module.ident()` otherwise.
-    ///
-    /// Unlike [`Self::module_ident`] this does not bail when idents weren't collected, so it's
-    /// usable from consumers that may run on graphs built either way (e.g.
-    /// `get_global_module_id_strategy`, which runs on the whole-app production graph as well as the
-    /// CLI build graph). The returned `ResolvedVc` is resolved either way; callers read it tracked.
+    /// Returns a module's eagerly-resolved `AssetIdent` `Vc`, read from its graph node. Idents are
+    /// always collected for `Module` nodes, and `get_entry` only resolves a module to its `Module`
+    /// node, so this always finds an ident. The returned `ResolvedVc` is read tracked by callers.
     pub fn module_ident_resolved(
         &self,
         module: ResolvedVc<Box<dyn Module>>,
     ) -> Result<ResolvedVc<AssetIdent>> {
         let idx = self.get_entry(module)?;
-        let Some(ident) = self.get_node(idx)?.ident_resolved() else {
-            bail!(
-                "module_ident() requires the module graph to be built with \
-                 `ModuleGraphOptions::include_idents`"
-            );
-        };
-        Ok(ident)
+        self.get_node(idx)?
+            .ident_resolved()
+            .context("a Module node always carries its eagerly-resolved ident")
+    }
+
+    /// Returns a module's eagerly-resolved `ident_string()` `Vc`, read from its graph node.
+    ///
+    /// Requires the graph to have been built with [`ModuleGraphOptions::include_ident_strings`];
+    /// `bail!`s otherwise. Asking a graph for an ident string it never collected is a programming
+    /// error — only the whole-app/CLI-build graphs that run the module-id strategy set the bit, and
+    /// those are exactly the graphs this is called on.
+    pub fn module_ident_string_resolved(
+        &self,
+        module: ResolvedVc<Box<dyn Module>>,
+    ) -> Result<ResolvedVc<RcStr>> {
+        let idx = self.get_entry(module)?;
+        self.get_node(idx)?.ident_string_resolved().context(
+            "module_ident_string_resolved() requires the module graph to be built with \
+             `ModuleGraphOptions::include_ident_strings`",
+        )
     }
 
     /// Iterate the edges of a node REVERSED!
@@ -1796,17 +1811,23 @@ impl SingleModuleGraph {
 pub enum SingleModuleGraphNode {
     Module {
         module: ResolvedVc<Box<dyn Module>>,
-        /// The module's resolved identifier, eagerly resolved at graph construction when the graph
-        /// was built with `include_idents` (only the production whole-app graph). Lets consumers
-        /// that need idents for many modules read them from the in-memory graph instead of each
-        /// fanning out a `module.ident()` turbo-task launch per module.
+        /// The module's resolved identifier, eagerly resolved at graph construction for every
+        /// `Module` node. Lets consumers that need idents for many modules read them from the
+        /// in-memory graph instead of each fanning out a `module.ident()` turbo-task launch per
+        /// module.
         ///
         /// Stored as a `ResolvedVc`, which serializes to just a cell id (so it survives a
         /// persistent-cache hit, unlike the previous `ReadRef`) and is `Copy`. Consumers read it
         /// with a *tracked* `.await?`: the producing task is already resolved by construction
         /// time, so the read is cheap, while the consumer still correctly depends on the
-        /// value. `None` for graphs built without `include_idents`/`emit_spans`.
-        ident: Option<ResolvedVc<AssetIdent>>,
+        /// value.
+        ident: ResolvedVc<AssetIdent>,
+        /// The module's resolved `ident_string()` (`ident().to_string()`) `Vc`, eagerly resolved
+        /// when the graph was built with `include_ident_strings`. The module-id strategy reads it
+        /// tracked and only runs on graphs built with the bit; `None` otherwise. Separate from
+        /// `ident` because the string is real work (recursive stringify) and only that one
+        /// consumer needs it.
+        ident_string: Option<ResolvedVc<RcStr>>,
         /// The module's resolved `is_self_async()` `Vc`. Always present: `async_module_info()`
         /// runs during chunking for every module graph, so this is unconditionally
         /// collected (it is cheap — the trait default is `Vc::cell(false)` and the ecma
@@ -1837,9 +1858,13 @@ pub enum SingleModuleGraphNode {
 mod size_test {
     use crate::module_graph::SingleModuleGraphNode;
 
+    /// Guards the per-module node size — there is one of these per module in the graph, so growth
+    /// here is multiplied across the whole app. The cached `ident_string` (`Option<ResolvedVc>`,
+    /// +8 bytes) is the cost of removing the per-module `ident().to_string()` fan-out from the
+    /// module-id strategy; bump deliberately if you add another field.
     #[test]
     pub fn test_size() {
-        assert_eq!(40, size_of::<SingleModuleGraphNode>());
+        assert_eq!(48, size_of::<SingleModuleGraphNode>());
     }
 }
 
@@ -1851,13 +1876,22 @@ impl SingleModuleGraphNode {
         }
     }
 
-    /// The eagerly-resolved ident, if this is a `Module` node from a graph built with
-    /// `include_idents` (or `emit_spans`). `Copy`. Returns `None` for `VisitedModule` nodes and for
-    /// graphs built without ident storage; callers should fall back to `module().ident()` and read
-    /// the returned `ResolvedVc` tracked.
+    /// The eagerly-resolved ident for `Module` nodes (always collected). `Copy`. Returns `None`
+    /// only for `VisitedModule` nodes (whose ident lives on their owning graph's node); callers
+    /// handling those should fall back to `module().ident()`.
     pub fn ident_resolved(&self) -> Option<ResolvedVc<AssetIdent>> {
         match self {
-            SingleModuleGraphNode::Module { ident, .. } => *ident,
+            SingleModuleGraphNode::Module { ident, .. } => Some(*ident),
+            SingleModuleGraphNode::VisitedModule { .. } => None,
+        }
+    }
+
+    /// The eagerly-resolved `ident_string()` `Vc`, if this is a `Module` node from a graph built
+    /// with `include_ident_strings`. `Copy`. `None` for `VisitedModule` nodes and for graphs built
+    /// without ident-string storage.
+    pub fn ident_string_resolved(&self) -> Option<ResolvedVc<RcStr>> {
+        match self {
+            SingleModuleGraphNode::Module { ident_string, .. } => *ident_string,
             SingleModuleGraphNode::VisitedModule { .. } => None,
         }
     }
@@ -1920,10 +1954,13 @@ enum SingleModuleGraphBuilderNode {
     /// A regular module
     Module {
         module: ResolvedVc<Box<dyn Module>>,
-        /// The module's resolved `AssetIdent`, eagerly resolved when the graph stores idents
-        /// (`include_idents`); `None` otherwise. Excluded from `Hash`/`Eq` (see below) since it is
-        /// fully determined by `module`.
-        ident: Option<ResolvedVc<AssetIdent>>,
+        /// The module's resolved `AssetIdent`, always resolved. Excluded from `Hash`/`Eq` (see
+        /// below) since it is fully determined by `module`.
+        ident: ResolvedVc<AssetIdent>,
+        /// The module's resolved `ident_string()` `Vc`, resolved when the graph stores them
+        /// (`include_ident_strings`); `None` otherwise. Excluded from `Hash`/`Eq` — determined by
+        /// `module`.
+        ident_string: Option<ResolvedVc<RcStr>>,
         /// The module's resolved `is_self_async()` `Vc`, always resolved (see node field docs).
         /// Excluded from `Hash`/`Eq` — determined by `module`.
         is_self_async: ResolvedVc<bool>,
@@ -2006,7 +2043,7 @@ impl Hash for SingleModuleGraphBuilderNode {
 impl SingleModuleGraphBuilderNode {
     async fn new_module(
         emit_spans: bool,
-        include_idents: bool,
+        include_ident_strings: bool,
         include_side_effects: bool,
         include_mergeable: bool,
         module: ResolvedVc<Box<dyn Module>>,
@@ -2020,8 +2057,13 @@ impl SingleModuleGraphBuilderNode {
         // depend on the value while the read itself stays cheap.
         Ok(Self::Module {
             module,
-            ident: if include_idents {
-                Some(module.ident().to_resolved().await?)
+            // Always collected: idents have many consumers (NFT, feature usage, module-id strategy,
+            // import tracer). Resolving here is cheaper than the previous `ReadRef` content read.
+            ident: module.ident().to_resolved().await?,
+            // Only the module-id strategy needs the stringified ident, and only on the graphs that
+            // set this bit. `ident_string()` is real work (recursive stringify), so it's gated.
+            ident_string: if include_ident_strings {
+                Some(module.ident_string().to_resolved().await?)
             } else {
                 None
             },
@@ -2099,7 +2141,7 @@ impl Visit<SingleModuleGraphBuilderNode, RefData> for SingleModuleGraphBuilder<'
         let visited_modules = self.visited_modules;
         let emit_spans = self.emit_spans;
         let ModuleGraphOptions {
-            include_idents,
+            include_ident_strings,
             include_side_effects,
             include_mergeable,
             include_traced,
@@ -2152,7 +2194,7 @@ impl Visit<SingleModuleGraphBuilderNode, RefData> for SingleModuleGraphBuilder<'
                     } else {
                         SingleModuleGraphBuilderNode::new_module(
                             emit_spans,
-                            include_idents,
+                            include_ident_strings,
                             include_side_effects,
                             include_mergeable,
                             target,
