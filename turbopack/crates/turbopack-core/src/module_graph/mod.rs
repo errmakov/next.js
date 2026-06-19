@@ -1833,6 +1833,15 @@ pub enum SingleModuleGraphNode {
         module: ResolvedVc<Box<dyn Module>>,
     },
 }
+#[cfg(test)]
+mod size_test {
+    use crate::module_graph::SingleModuleGraphNode;
+
+    #[test]
+    pub fn test_size() {
+        assert_eq!(40, size_of::<SingleModuleGraphNode>());
+    }
+}
 
 impl SingleModuleGraphNode {
     pub fn module(&self) -> ResolvedVc<Box<dyn Module>> {
@@ -2033,7 +2042,7 @@ impl SingleModuleGraphBuilderNode {
                 Some(
                     match ResolvedVc::try_downcast::<Box<dyn MergeableModule>>(module) {
                         Some(mergeable) => mergeable.is_mergeable().to_resolved().await?,
-                        None => Vc::<bool>::cell(false).to_resolved().await?,
+                        None => Vc::<bool>::default().to_resolved().await?,
                     },
                 )
             } else {
