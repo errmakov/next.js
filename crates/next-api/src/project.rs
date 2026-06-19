@@ -1786,16 +1786,16 @@ impl Project {
         // appears in the module graph, but the synthesized `target.css` module's path suffix does.
         // `ident.path.path` does not include the query string (that lives on `ident.query`), so
         // `ends_with` is the correct matcher here.
-        static FEATURE_MODULE_PATH_SUFFIXES: &[(&str, &str)] = &[
-            ("next/image", "/next/image.js"),
-            ("next/future/image", "/next/future/image.js"),
-            ("next/legacy/image", "/next/legacy/image.js"),
-            ("next/script", "/next/script.js"),
-            ("next/dynamic", "/next/dynamic.js"),
-            ("next/font/google", "/next/font/google/target.css"),
-            ("next/font/local", "/next/font/local/target.css"),
-            ("@next/font/google", "/@next/font/google/target.css"),
-            ("@next/font/local", "/@next/font/local/target.css"),
+        static FEATURE_MODULE_PATH_SUFFIXES: &[(RcStr, &str)] = &[
+            (rcstr!("next/image"), "/next/image.js"),
+            (rcstr!("next/future/image"), "/next/future/image.js"),
+            (rcstr!("next/legacy/image"), "/next/legacy/image.js"),
+            (rcstr!("next/script"), "/next/script.js"),
+            (rcstr!("next/dynamic"), "/next/dynamic.js"),
+            (rcstr!("next/font/google"), "/next/font/google/target.css"),
+            (rcstr!("next/font/local"), "/next/font/local/target.css"),
+            (rcstr!("@next/font/google"), "/@next/font/google/target.css"),
+            (rcstr!("@next/font/local"), "/@next/font/local/target.css"),
         ];
 
         // TODO: useSwcLoader is not being reported as it is not directly corresponds (it checks
@@ -1862,12 +1862,12 @@ impl Project {
         //     to that feature's unique-importer set.
         let module_graph = self.whole_app_module_graphs().await?.full.await?;
 
-        let matching: FxHashMap<ResolvedVc<Box<dyn Module>>, &'static str> = module_graph
+        let matching: FxHashMap<ResolvedVc<Box<dyn Module>>, &'static RcStr> = module_graph
             .iter_nodes()
             .map(async |node| {
-                let ident = module_graph.module_ident(node).await?;
+                let ident = module_graph.module_ident_resolved(node)?.await?;
                 let path = &ident.path.path;
-                for &(feature, suffix) in FEATURE_MODULE_PATH_SUFFIXES {
+                for (feature, suffix) in FEATURE_MODULE_PATH_SUFFIXES {
                     if path.ends_with(suffix) {
                         return Ok(Some((node, feature)));
                     }
@@ -1886,13 +1886,13 @@ impl Project {
         // We could filter via `BindingUsageInfo` to only count edges that survive tree-shaking,
         // but staying parallel to webpack lets dashboards compare counts across the two bundlers
         // directly.
-        let mut pairs: FxHashSet<(&'static str, ResolvedVc<Box<dyn Module>>)> =
-            FxHashSet::default();
+        let mut pairs: Vec<(&'static RcStr, ResolvedVc<Box<dyn Module>>)> =
+            Vec::with_capacity(matching.len() * 2);
         module_graph.traverse_edges_unordered(|parent, node| {
             if let Some((parent_node, _)) = parent
                 && let Some(&feature) = matching.get(&node)
             {
-                pairs.insert((feature, parent_node));
+                pairs.push((feature, parent_node));
             }
             Ok(())
         })?;
@@ -1904,7 +1904,7 @@ impl Project {
         let parent_source_keys = pairs
             .into_iter()
             .map(async |(feature, parent)| {
-                let ident = module_graph.module_ident(parent).await?;
+                let ident = module_graph.module_ident_resolved(parent)?.await?;
                 let key = (
                     ident.path.path.clone(),
                     ident.query.clone(),
@@ -1915,13 +1915,13 @@ impl Project {
             .try_join()
             .await?;
 
-        let mut importers: FxHashMap<&'static str, FxHashSet<(RcStr, RcStr, RcStr)>> =
+        let mut importers: FxHashMap<&'static RcStr, FxHashSet<(RcStr, RcStr, RcStr)>> =
             FxHashMap::default();
         for (feature, key) in parent_source_keys {
             importers.entry(feature).or_default().insert(key);
         }
         for (feature, unique_sources) in importers {
-            features.push((RcStr::from(feature), unique_sources.len() as u32));
+            features.push((feature.clone(), unique_sources.len() as u32));
         }
 
         features.sort_by(|a, b| a.0.cmp(&b.0));

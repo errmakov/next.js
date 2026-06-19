@@ -11,7 +11,6 @@ use turbopack_core::{
         chunk_id_strategy::{ModuleIdFallback, ModuleIdStrategy},
     },
     ident::AssetIdent,
-    module::Module,
     module_graph::{ModuleGraph, RefData},
 };
 use turbopack_ecmascript::async_chunk::module::AsyncLoaderModule;
@@ -29,7 +28,7 @@ pub async fn get_global_module_id_strategy(
         let mut modules = FxHashSet::default();
         let mut async_idents = vec![];
         module_graph.traverse_edges_unordered(|parent, current| {
-            modules.insert(current);
+            modules.insert(*module_graph.module_ident_resolved(current)?);
             if let Some((
                 _,
                 &RefData {
@@ -47,7 +46,6 @@ pub async fn get_global_module_id_strategy(
 
         let mut module_id_map = modules
             .into_iter()
-            .map(|m| m.ident())
             .chain(async_idents.into_iter())
             .map(|ident| async move {
                 let ident = ident.to_resolved().await?;

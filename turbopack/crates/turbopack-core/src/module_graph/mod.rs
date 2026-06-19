@@ -1152,19 +1152,18 @@ impl ModuleGraphSnapshot {
         self.graphs.iter().flat_map(|g| g.iter_nodes())
     }
 
-    /// Recovers a single module's resolved `AssetIdent` from the graph.
+    /// Returns a module's resolved `AssetIdent` `Vc`, preferring the eagerly-resolved ident stored
+    /// on the node (graphs built with [`ModuleGraphOptions::include_idents`]) and falling back to
+    /// `module.ident()` otherwise.
     ///
-    /// Requires the graph to have been built with [`ModuleGraphOptions::include_idents`]: a
-    /// `Module` node stores its ident iff that bit was set, so a missing ident means the graph
-    /// never collected idents and this `bail!`s — asking the graph for an ident it never collected
-    /// is a programming error (call `module.ident()` directly instead). The ident `ResolvedVc` is
-    /// read from the node and `.await?`ed (tracked): the producing task was already resolved at
-    /// graph construction, so this read is cheap, while the caller still correctly depends on the
-    /// ident value.
-    pub async fn module_ident(
+    /// Unlike [`Self::module_ident`] this does not bail when idents weren't collected, so it's
+    /// usable from consumers that may run on graphs built either way (e.g.
+    /// `get_global_module_id_strategy`, which runs on the whole-app production graph as well as the
+    /// CLI build graph). The returned `ResolvedVc` is resolved either way; callers read it tracked.
+    pub fn module_ident_resolved(
         &self,
         module: ResolvedVc<Box<dyn Module>>,
-    ) -> Result<ReadRef<AssetIdent>> {
+    ) -> Result<ResolvedVc<AssetIdent>> {
         let idx = self.get_entry(module)?;
         let Some(ident) = self.get_node(idx)?.ident_resolved() else {
             bail!(
@@ -1172,7 +1171,7 @@ impl ModuleGraphSnapshot {
                  `ModuleGraphOptions::include_idents`"
             );
         };
-        Ok(ident.await?)
+        Ok(ident)
     }
 
     /// Iterate the edges of a node REVERSED!
