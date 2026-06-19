@@ -2040,6 +2040,70 @@ impl Hash for SingleModuleGraphBuilderNode {
     }
 }
 
+/// The eagerly-resolved per-module data stored on a [`SingleModuleGraphNode::Module`]. Computed by
+/// [`module_graph_node_data`] so the `to_resolved()` dependency edges are owned by a per-module
+/// task instead of the single graph-construction task.
+#[turbo_tasks::value]
+struct ModuleGraphNodeData {
+    ident: ResolvedVc<AssetIdent>,
+    ident_string: Option<ResolvedVc<RcStr>>,
+    is_self_async: ResolvedVc<bool>,
+    side_effects: Option<ResolvedVc<ModuleSideEffects>>,
+    is_mergeable: Option<ResolvedVc<bool>>,
+}
+
+/// Resolves a module's graph-node data. Each `to_resolved()` (resolving the pointer chain,
+/// executing the producing task — the same work `references()` already triggers via `analyze()`,
+/// without reading the cell content) installs its dependency edge on *this* per-module task, which
+/// is cached and shared across graphs built with the same options. The graph builder then just
+/// reads the already-resolved cells. The `include_*` flags are part of the task key but are
+/// constant within a graph build.
+#[turbo_tasks::function]
+async fn module_graph_node_data(
+    module: Vc<Box<dyn Module>>,
+    include_ident_strings: bool,
+    include_side_effects: bool,
+    include_mergeable: bool,
+) -> Result<Vc<ModuleGraphNodeData>> {
+    Ok(ModuleGraphNodeData {
+        // Always collected: idents have many consumers (NFT, feature usage, module-id strategy,
+        // import tracer).
+        ident: module.ident().to_resolved().await?,
+        // Only the module-id strategy needs the stringified ident, and only on the graphs that set
+        // this bit. `ident_string()` is real work (recursive stringify), so it's gated.
+        ident_string: if include_ident_strings {
+            Some(module.ident_string().to_resolved().await?)
+        } else {
+            None
+        },
+        // Always collected: `async_module_info()` runs during chunking for every graph. Cheap to
+        // resolve (trait default `Vc::cell(false)`; ecma reads already-cached `references()`).
+        is_self_async: module.is_self_async().to_resolved().await?,
+        side_effects: if include_side_effects {
+            Some(module.side_effects().to_resolved().await?)
+        } else {
+            None
+        },
+        // When collecting mergeability, store `Some` for *every* module so that `None` at the node
+        // level unambiguously means "graph not built with `include_mergeable`". Types that
+        // implement `MergeableModule` get their real `is_mergeable()`; others get a
+        // resolved `false` (the interned `false` cell, so this is cheap and deduped).
+        is_mergeable: if include_mergeable {
+            Some(
+                match ResolvedVc::try_downcast::<Box<dyn MergeableModule>>(
+                    module.to_resolved().await?,
+                ) {
+                    Some(mergeable) => mergeable.is_mergeable().to_resolved().await?,
+                    None => Vc::<bool>::default().to_resolved().await?,
+                },
+            )
+        } else {
+            None
+        },
+    }
+    .cell())
+}
+
 impl SingleModuleGraphBuilderNode {
     async fn new_module(
         emit_spans: bool,
@@ -2049,47 +2113,28 @@ impl SingleModuleGraphBuilderNode {
         module: ResolvedVc<Box<dyn Module>>,
         is_traced: bool,
     ) -> Result<Self> {
-        // MODEL: centralize task launch/resolution here, in the shared graph-construction task,
-        // so the ultimate consumers (aggregation, ident consumers) read an already-resolved cell.
-        // We `to_resolved()` (resolve the pointer chain, executing the producing task — the same
-        // work `references()` already triggers via `analyze()`) WITHOUT reading the cell content.
-        // Consumers then read the stored `ResolvedVc` with a tracked `.await?`, so they correctly
-        // depend on the value while the read itself stays cheap.
+        // The per-module `to_resolved()` calls happen inside `module_graph_node_data`, a
+        // `#[turbo_tasks::function]` keyed on the module — so those data-dependency edges are owned
+        // by that per-module task (and shared/cached across graphs) rather than concentrated in the
+        // single graph-construction task. We just read the already-resolved cells here.
+        //
+        // `final_read_hint`: we copy the individual `ResolvedVc`s onto the graph node and never
+        // read this intermediary cell again, so the backend can drop its cached content.
+        let data = module_graph_node_data(
+            *module,
+            include_ident_strings,
+            include_side_effects,
+            include_mergeable,
+        )
+        .final_read_hint()
+        .await?;
         Ok(Self::Module {
             module,
-            // Always collected: idents have many consumers (NFT, feature usage, module-id strategy,
-            // import tracer). Resolving here is cheaper than the previous `ReadRef` content read.
-            ident: module.ident().to_resolved().await?,
-            // Only the module-id strategy needs the stringified ident, and only on the graphs that
-            // set this bit. `ident_string()` is real work (recursive stringify), so it's gated.
-            ident_string: if include_ident_strings {
-                Some(module.ident_string().to_resolved().await?)
-            } else {
-                None
-            },
-            // Always collected: `async_module_info()` runs during chunking for every graph. Cheap
-            // to resolve (trait default `Vc::cell(false)`; ecma reads already-cached
-            // `references()`).
-            is_self_async: module.is_self_async().to_resolved().await?,
-            side_effects: if include_side_effects {
-                Some(module.side_effects().to_resolved().await?)
-            } else {
-                None
-            },
-            // When collecting mergeability, store `Some` for *every* module so that `None` at the
-            // node level unambiguously means "graph not built with `include_mergeable`". Types that
-            // implement `MergeableModule` get their real `is_mergeable()`; others get a resolved
-            // `false` (the interned `false` cell, so this is cheap and deduped).
-            is_mergeable: if include_mergeable {
-                Some(
-                    match ResolvedVc::try_downcast::<Box<dyn MergeableModule>>(module) {
-                        Some(mergeable) => mergeable.is_mergeable().to_resolved().await?,
-                        None => Vc::<bool>::default().to_resolved().await?,
-                    },
-                )
-            } else {
-                None
-            },
+            ident: data.ident,
+            ident_string: data.ident_string,
+            is_self_async: data.is_self_async,
+            side_effects: data.side_effects,
+            is_mergeable: data.is_mergeable,
             // The span name needs the ident value synchronously. Read it (untracked — its value is
             // non-load-bearing for correctness) only when spans are enabled. Stays on the builder
             // node; never reaches the graph node.
