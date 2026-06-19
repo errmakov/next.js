@@ -2065,14 +2065,15 @@ async fn module_graph_node_data(
     include_side_effects: bool,
     include_mergeable: bool,
 ) -> Result<Vc<ModuleGraphNodeData>> {
+    let ident = module.ident().to_resolved().await?;
     Ok(ModuleGraphNodeData {
         // Always collected: idents have many consumers (NFT, feature usage, module-id strategy,
         // import tracer).
-        ident: module.ident().to_resolved().await?,
+        ident,
         // Only the module-id strategy needs the stringified ident, and only on the graphs that set
         // this bit. `ident_string()` is real work (recursive stringify), so it's gated.
         ident_string: if include_ident_strings {
-            Some(module.ident_string().to_resolved().await?)
+            Some(ident.to_string().to_resolved().await?)
         } else {
             None
         },
