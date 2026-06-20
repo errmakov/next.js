@@ -411,6 +411,37 @@ impl SingleModuleGraph {
             .completed()?;
         let node_count = children_nodes_iter.len();
 
+        // Materialize the breadth-first edges into an owned `Vec`. This drops the `AdjacencyMap`
+        // iterator (and lets us `.await` below without holding it across a suspension point — the
+        // build loop itself must stay synchronous, see the `node_data` read note below).
+        let edges = children_nodes_iter
+            .into_breadth_first_edges()
+            .collect::<Vec<_>>();
+
+        // Read each unique module's `node_data` cell exactly once, off the synchronous build loop.
+        // `new_module` resolved (but didn't read) the cell, distributing the data-dependency edges
+        // onto per-module tasks; reading here once per module (rather than once per incoming edge)
+        // lets us pass `final_read_hint` so the backend can drop the now-unneeded cell content.
+        let node_data = {
+            let mut seen = FxHashSet::default();
+            edges
+                .iter()
+                .filter_map(|(_, current)| match current {
+                    SingleModuleGraphBuilderNode::Module {
+                        module, node_data, ..
+                    } => seen.insert(*module).then_some((*module, *node_data)),
+                    SingleModuleGraphBuilderNode::VisitedModule { .. } => None,
+                })
+                .map(async |(module, node_data)| Ok((module, node_data.final_read_hint().await?)))
+                .try_join()
+                // `.instrument(...)` rather than an entered guard: an `Entered` span guard is
+                // `!Send` and would poison this future when held across the `.await`.
+                .instrument(tracing::info_span!("read module graph node data"))
+                .await?
+                .into_iter()
+                .collect::<FxHashMap<_, _>>()
+        };
+
         let mut graph: DiGraph<SingleModuleGraphNode, RefData> = DiGraph::with_capacity(
             node_count,
             // From real world measurements each module has about 3-4 children
@@ -423,41 +454,33 @@ impl SingleModuleGraph {
             FxHashMap::with_capacity_and_hasher(node_count, Default::default());
         {
             let _span = tracing::info_span!("build module graph").entered();
-            for (parent, current) in children_nodes_iter.into_breadth_first_edges() {
-                let (module, graph_node, count) = match current {
-                    SingleModuleGraphBuilderNode::Module {
-                        module,
-                        is_traced: _,
-                        ident,
-                        ident_string,
-                        is_self_async,
-                        side_effects,
-                        is_mergeable,
-                        // Transient: only used by the builder to format span names.
-                        span_ident: _,
-                    } => (
-                        module,
-                        SingleModuleGraphNode::Module {
-                            module,
-                            ident,
-                            ident_string,
-                            is_self_async,
-                            side_effects,
-                            is_mergeable,
-                        },
-                        1,
-                    ),
-                    SingleModuleGraphBuilderNode::VisitedModule { module, idx } => (
-                        module,
-                        SingleModuleGraphNode::VisitedModule { idx, module },
-                        0,
-                    ),
-                };
-
-                // Find the current node, if it was already added
+            // Synchronous: no `.await` here (the loop holds the `tracing` span guard and many
+            // mutable locals across iterations; the per-module `node_data` was already read above).
+            for (parent, current) in edges {
+                let module = current.module();
+                // Find the current node, if it was already added.
                 let current_idx = if let Some(current_idx) = modules.get(&module) {
                     *current_idx
                 } else {
+                    let (graph_node, count) = match current {
+                        SingleModuleGraphBuilderNode::Module { module, .. } => {
+                            let data = &node_data[&module];
+                            (
+                                SingleModuleGraphNode::Module {
+                                    module,
+                                    ident: data.ident,
+                                    ident_string: data.ident_string,
+                                    is_self_async: data.is_self_async,
+                                    side_effects: data.side_effects,
+                                    is_mergeable: data.is_mergeable,
+                                },
+                                1,
+                            )
+                        }
+                        SingleModuleGraphBuilderNode::VisitedModule { module, idx } => {
+                            (SingleModuleGraphNode::VisitedModule { idx, module }, 0)
+                        }
+                    };
                     let idx = graph.add_node(graph_node);
                     number_of_modules += count;
                     modules.insert(module, idx);
@@ -1954,24 +1977,12 @@ enum SingleModuleGraphBuilderNode {
     /// A regular module
     Module {
         module: ResolvedVc<Box<dyn Module>>,
-        /// The module's resolved `AssetIdent`, always resolved. Excluded from `Hash`/`Eq` (see
-        /// below) since it is fully determined by `module`.
-        ident: ResolvedVc<AssetIdent>,
-        /// The module's resolved `ident_string()` `Vc`, resolved when the graph stores them
-        /// (`include_ident_strings`); `None` otherwise. Excluded from `Hash`/`Eq` — determined by
-        /// `module`.
-        ident_string: Option<ResolvedVc<RcStr>>,
-        /// The module's resolved `is_self_async()` `Vc`, always resolved (see node field docs).
-        /// Excluded from `Hash`/`Eq` — determined by `module`.
-        is_self_async: ResolvedVc<bool>,
-        /// The module's resolved `side_effects()` `Vc`, resolved when the graph stores them
-        /// (`include_side_effects`); `None` otherwise. Excluded from `Hash`/`Eq` — determined by
-        /// `module`.
-        side_effects: Option<ResolvedVc<ModuleSideEffects>>,
-        /// The module's resolved `is_mergeable()` `Vc` (or a resolved `false` for non-mergeable
-        /// types), resolved when the graph stores them (`include_mergeable`); `None` otherwise.
-        /// Excluded from `Hash`/`Eq` — determined by `module`.
-        is_mergeable: Option<ResolvedVc<bool>>,
+        /// The module's resolved `module_graph_node_data` cell — *resolved* (pointer only, not
+        /// read) in `new_module`, so the per-module task owns the data-dependency edges. The cell
+        /// content is read exactly once, at dedup time in `new_inner` (with `final_read_hint`),
+        /// since `new_module` runs once per incoming edge. Excluded from `Hash`/`Eq` (see below)
+        /// since it is fully determined by `module`.
+        node_data: ResolvedVc<ModuleGraphNodeData>,
         /// The module's ident read as a `ReadRef`, populated only when `emit_spans` so [`span`]
         /// can format the span name synchronously. Transient (never reaches the graph
         /// node) and excluded from `Hash`/`Eq`.
@@ -2055,9 +2066,10 @@ struct ModuleGraphNodeData {
 /// Resolves a module's graph-node data. Each `to_resolved()` (resolving the pointer chain,
 /// executing the producing task — the same work `references()` already triggers via `analyze()`,
 /// without reading the cell content) installs its dependency edge on *this* per-module task, which
-/// is cached and shared across graphs built with the same options. The graph builder then just
-/// reads the already-resolved cells. The `include_*` flags are part of the task key but are
-/// constant within a graph build.
+/// is cached and shared across graphs built with the same options. The graph builder *resolves*
+/// (but does not read) this cell in `new_module`, then reads it exactly once at dedup time in
+/// `new_inner` with `final_read_hint`, so the backend can drop the content afterward. The
+/// `include_*` flags are part of the task key but are constant within a graph build.
 #[turbo_tasks::function]
 async fn module_graph_node_data(
     module: Vc<Box<dyn Module>>,
@@ -2106,6 +2118,13 @@ async fn module_graph_node_data(
 }
 
 impl SingleModuleGraphBuilderNode {
+    fn module(&self) -> ResolvedVc<Box<dyn Module>> {
+        match self {
+            SingleModuleGraphBuilderNode::Module { module, .. } => *module,
+            SingleModuleGraphBuilderNode::VisitedModule { module, .. } => *module,
+        }
+    }
+
     async fn new_module(
         emit_spans: bool,
         include_ident_strings: bool,
@@ -2117,25 +2136,21 @@ impl SingleModuleGraphBuilderNode {
         // The per-module `to_resolved()` calls happen inside `module_graph_node_data`, a
         // `#[turbo_tasks::function]` keyed on the module — so those data-dependency edges are owned
         // by that per-module task (and shared/cached across graphs) rather than concentrated in the
-        // single graph-construction task. We just read the already-resolved cells here.
-        //
-        // `final_read_hint`: we copy the individual `ResolvedVc`s onto the graph node and never
-        // read this intermediary cell again, so the backend can drop its cached content.
-        let data = module_graph_node_data(
+        // single graph-construction task. We only *resolve* the cell here (pointer only, no content
+        // read); it is read once at dedup time in `new_inner`. `new_module` runs once per incoming
+        // edge, so reading here would read the same cell once per importer — deferring the read to
+        // the single dedup point lets that read use `final_read_hint`.
+        let node_data = module_graph_node_data(
             *module,
             include_ident_strings,
             include_side_effects,
             include_mergeable,
         )
-        .final_read_hint()
+        .to_resolved()
         .await?;
         Ok(Self::Module {
             module,
-            ident: data.ident,
-            ident_string: data.ident_string,
-            is_self_async: data.is_self_async,
-            side_effects: data.side_effects,
-            is_mergeable: data.is_mergeable,
+            node_data,
             // The span name needs the ident value synchronously. Read it (untracked — its value is
             // non-load-bearing for correctness) only when spans are enabled. Stays on the builder
             // node; never reaches the graph node.
