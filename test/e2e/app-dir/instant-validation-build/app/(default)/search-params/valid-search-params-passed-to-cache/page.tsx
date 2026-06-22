@@ -1,5 +1,6 @@
 import type { Instant } from 'next'
 import assert from 'node:assert/strict'
+import { Fragment, Suspense } from 'react'
 
 export const instant: Instant = {
   level: 'experimental-error',
@@ -21,10 +22,22 @@ export default async function Page({
 }) {
   return (
     <main>
-      <CachedChild searchParams={await searchParams} />
+      <SuspenseInAppShells>
+        <Inner searchParams={searchParams} />
+      </SuspenseInAppShells>
     </main>
   )
 }
+
+async function Inner({
+  searchParams,
+}: {
+  searchParams: Promise<Record<string, string | string[]>>
+}) {
+  return <CachedChild searchParams={await searchParams} />
+}
+
+const SuspenseInAppShells = process.env.__NEXT_APP_SHELLS ? Suspense : Fragment
 
 async function CachedChild({
   searchParams,

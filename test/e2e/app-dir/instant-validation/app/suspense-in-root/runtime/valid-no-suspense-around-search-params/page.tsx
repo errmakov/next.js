@@ -1,5 +1,5 @@
 import { connection } from 'next/server'
-import { Suspense } from 'react'
+import { Suspense, Fragment } from 'react'
 
 export const instant = {
   level: 'experimental-error',
@@ -12,12 +12,13 @@ export default async function Page({
 }: {
   searchParams: Promise<Record<string, string | string[]>>
 }) {
-  const search = await searchParams
   return (
     <main>
       <div>
         <p>Params don't need a suspense boundary when runtime-prefetched:</p>
-        <div id="runtime-content">Search: {JSON.stringify(search)}</div>
+        <SuspenseInAppShells>
+          <LinkData searchParams={searchParams} />
+        </SuspenseInAppShells>
       </div>
 
       <div>
@@ -28,6 +29,17 @@ export default async function Page({
       </div>
     </main>
   )
+}
+
+const SuspenseInAppShells = process.env.__NEXT_APP_SHELLS ? Suspense : Fragment
+
+async function LinkData({
+  searchParams,
+}: {
+  searchParams: Promise<Record<string, string | string[]>>
+}) {
+  const search = await searchParams
+  return <div id="runtime-content">Search: {JSON.stringify(search)}</div>
 }
 
 async function Dynamic() {

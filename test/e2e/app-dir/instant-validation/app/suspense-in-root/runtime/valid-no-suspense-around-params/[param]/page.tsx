@@ -1,5 +1,5 @@
 import { connection } from 'next/server'
-import { Suspense } from 'react'
+import { Suspense, Fragment } from 'react'
 
 export const instant = {
   level: 'experimental-error',
@@ -12,12 +12,13 @@ export default async function Page({
 }: {
   params: Promise<{ param: string }>
 }) {
-  const { param } = await params
   return (
     <main>
       <div>
         <p>Params don't need a suspense boundary when runtime-prefetched:</p>
-        <div id="runtime-content">Param value: {param}</div>
+        <SuspenseInAppShells>
+          <LinkData params={params} />
+        </SuspenseInAppShells>
       </div>
 
       <div>
@@ -29,6 +30,13 @@ export default async function Page({
     </main>
   )
 }
+
+async function LinkData({ params }: { params: Promise<{ param: string }> }) {
+  const { param } = await params
+  return <div id="runtime-content">Param value: {param}</div>
+}
+
+const SuspenseInAppShells = process.env.__NEXT_APP_SHELLS ? Suspense : Fragment
 
 async function Dynamic() {
   await connection()

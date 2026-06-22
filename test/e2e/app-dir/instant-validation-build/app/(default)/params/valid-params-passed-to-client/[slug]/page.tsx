@@ -1,5 +1,6 @@
 import type { Instant } from 'next'
 import { ClientChild } from './client'
+import { Fragment, Suspense } from 'react'
 
 export const instant: Instant = {
   level: 'experimental-error',
@@ -14,7 +15,15 @@ export default async function Page({
 }) {
   return (
     <main>
-      <ClientChild params={await params} />
+      <SuspenseInAppShells>
+        <Inner params={params} />
+      </SuspenseInAppShells>
     </main>
   )
 }
+
+async function Inner({ params }: { params: Promise<Record<string, string>> }) {
+  return <ClientChild params={await params} />
+}
+
+const SuspenseInAppShells = process.env.__NEXT_APP_SHELLS ? Suspense : Fragment

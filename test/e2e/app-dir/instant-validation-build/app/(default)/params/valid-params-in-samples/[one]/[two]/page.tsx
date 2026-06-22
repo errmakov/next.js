@@ -1,5 +1,6 @@
 import type { Instant } from 'next'
 import assert from 'node:assert/strict'
+import { Fragment, Suspense } from 'react'
 
 export const instant: Instant = {
   level: 'experimental-error',
@@ -25,10 +26,14 @@ export default async function Page({
         When validated in build, the page should receive the params specified in
         the sample.
       </p>
-      <TestParams params={params} />
+      <SuspenseInAppShells>
+        <TestParams params={params} />
+      </SuspenseInAppShells>
     </main>
   )
 }
+
+const SuspenseInAppShells = process.env.__NEXT_APP_SHELLS ? Suspense : Fragment
 
 async function TestParams({
   params,
