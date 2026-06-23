@@ -1182,36 +1182,6 @@ impl ModuleGraphSnapshot {
         self.graphs.iter().flat_map(|g| g.iter_nodes())
     }
 
-    /// Returns a module's eagerly-resolved `AssetIdent` `Vc`, read from its graph node. Idents are
-    /// always collected for `Module` nodes, and `get_entry` only resolves a module to its `Module`
-    /// node, so this always finds an ident. The returned `ResolvedVc` is read tracked by callers.
-    pub fn module_ident_resolved(
-        &self,
-        module: ResolvedVc<Box<dyn Module>>,
-    ) -> Result<ResolvedVc<AssetIdent>> {
-        let idx = self.get_entry(module)?;
-        self.get_node(idx)?
-            .ident_resolved()
-            .context("a Module node always carries its eagerly-resolved ident")
-    }
-
-    /// Returns a module's eagerly-resolved `ident_string()` `Vc`, read from its graph node.
-    ///
-    /// Requires the graph to have been built with [`ModuleGraphOptions::include_ident_strings`];
-    /// `bail!`s otherwise. Asking a graph for an ident string it never collected is a programming
-    /// error — only the whole-app/CLI-build graphs that run the module-id strategy set the bit, and
-    /// those are exactly the graphs this is called on.
-    pub fn module_ident_string_resolved(
-        &self,
-        module: ResolvedVc<Box<dyn Module>>,
-    ) -> Result<ResolvedVc<RcStr>> {
-        let idx = self.get_entry(module)?;
-        self.get_node(idx)?.ident_string_resolved().context(
-            "module_ident_string_resolved() requires the module graph to be built with \
-             `ModuleGraphOptions::include_ident_strings`",
-        )
-    }
-
     /// Iterate the edges of a node REVERSED!
     fn iter_graphs_neighbors_rev<'a>(
         &'a self,
@@ -1261,6 +1231,36 @@ impl ModuleGraphSnapshot {
             .await?
             .into_iter()
             .collect::<FxHashMap<_, _>>())
+    }
+
+    /// Returns a module's eagerly-resolved `AssetIdent` `Vc`, read from its graph node. Idents are
+    /// always collected for `Module` nodes, and `get_entry` only resolves a module to its `Module`
+    /// node, so this always finds an ident. The returned `ResolvedVc` is read tracked by callers.
+    pub fn module_ident_resolved(
+        &self,
+        module: ResolvedVc<Box<dyn Module>>,
+    ) -> Result<ResolvedVc<AssetIdent>> {
+        let idx = self.get_entry(module)?;
+        self.get_node(idx)?
+            .ident_resolved()
+            .context("a Module node always carries its eagerly-resolved ident")
+    }
+
+    /// Returns a module's eagerly-resolved `ident_string()` `Vc`, read from its graph node.
+    ///
+    /// Requires the graph to have been built with [`ModuleGraphOptions::include_ident_strings`];
+    /// `bail!`s otherwise. Asking a graph for an ident string it never collected is a programming
+    /// error — only the whole-app/CLI-build graphs that run the module-id strategy set the bit, and
+    /// those are exactly the graphs this is called on.
+    pub fn module_ident_string_resolved(
+        &self,
+        module: ResolvedVc<Box<dyn Module>>,
+    ) -> Result<ResolvedVc<RcStr>> {
+        let idx = self.get_entry(module)?;
+        self.get_node(idx)?.ident_string_resolved().context(
+            "module_ident_string_resolved() requires the module graph to be built with \
+             `ModuleGraphOptions::include_ident_strings`",
+        )
     }
 
     /// Traverses all reachable nodes exactly once and calls the visitor.
@@ -1983,12 +1983,12 @@ enum SingleModuleGraphBuilderNode {
         /// since `new_module` runs once per incoming edge. Excluded from `Hash`/`Eq` (see below)
         /// since it is fully determined by `module`.
         node_data: ResolvedVc<ModuleGraphNodeData>,
-        /// The module's ident read as a `ReadRef`, populated only when `emit_spans` so [`span`]
-        /// can format the span name synchronously. Transient (never reaches the graph
-        /// node) and excluded from `Hash`/`Eq`.
+        /// The module's `ident().to_string()`, read (untracked) only when `emit_spans` so [`span`]
+        /// can use it as the span name synchronously. Transient (never reaches the graph node) and
+        /// excluded from `Hash`/`Eq`.
         ///
         /// [`span`]: SingleModuleGraphBuilder::span
-        span_ident: Option<ReadRef<AssetIdent>>,
+        span_name: Option<ReadRef<RcStr>>,
         /// whether this module is a tracing context
         is_traced: bool,
     },
@@ -2151,11 +2151,11 @@ impl SingleModuleGraphBuilderNode {
         Ok(Self::Module {
             module,
             node_data,
-            // The span name needs the ident value synchronously. Read it (untracked — its value is
+            // The span name needs the ident string synchronously. Read it (untracked — its value is
             // non-load-bearing for correctness) only when spans are enabled. Stays on the builder
             // node; never reaches the graph node.
-            span_ident: if emit_spans {
-                Some(module.ident().untracked().await?)
+            span_name: if emit_spans {
+                Some(module.ident().to_string().untracked().await?)
             } else {
                 None
             },
@@ -2288,17 +2288,16 @@ impl Visit<SingleModuleGraphBuilderNode, RefData> for SingleModuleGraphBuilder<'
 
         let mut span = match node {
             SingleModuleGraphBuilderNode::Module {
-                span_ident: Some(span_ident),
+                span_name: Some(span_name),
                 ..
             } => {
-                // Format the span name from the in-memory ident (no extra read). `AssetIdent` has
-                // no `Display`, so use its path; span-name fidelity is
-                // non-load-bearing. `span_ident` is populated whenever `emit_spans`, so this arm is
-                // taken for every `Module` node here.
-                tracing::info_span!("module", name = display(&span_ident.path.path))
+                // Use the precomputed `ident().to_string()` (read untracked in `new_module`).
+                // `span_name` is populated whenever `emit_spans`, so this arm is taken for every
+                // `Module` node here.
+                tracing::info_span!("module", name = display(span_name))
             }
             SingleModuleGraphBuilderNode::Module {
-                span_ident: None, ..
+                span_name: None, ..
             } => {
                 tracing::info_span!("module")
             }
