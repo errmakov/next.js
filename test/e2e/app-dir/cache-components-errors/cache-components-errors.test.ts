@@ -114,14 +114,14 @@ describe('Cache Components Errors', () => {
             await expect(browser).toDisplayCollapsedRedbox(`
              {
                "code": "E1370",
-             "description": "Next.js encountered uncached data in generateMetadata().",
-             "environmentLabel": "Server",
-             "label": "Blocking Route",
-             "source": "app/dynamic-metadata-static-route/page.tsx (2:9) @ Module.generateMetadata
-           > 2 |   await new Promise((r) => setTimeout(r, 0))
-               |         ^",
-             "stack": [
-               "Module.generateMetadata app/dynamic-metadata-static-route/page.tsx (2:9)",
+               "description": "Next.js encountered uncached data in generateMetadata().",
+               "environmentLabel": "Server",
+               "label": "Blocking Route",
+               "source": "app/dynamic-metadata-static-route/page.tsx (2:9) @ Module.generateMetadata
+             > 2 |   await new Promise((r) => setTimeout(r, 0))
+                 |         ^",
+               "stack": [
+                 "Module.generateMetadata app/dynamic-metadata-static-route/page.tsx (2:9)",
                ],
              }
             `)
@@ -373,14 +373,14 @@ describe('Cache Components Errors', () => {
             await expect(browser).toDisplayCollapsedRedbox(`
              {
                "code": "E1370",
-             "description": "Next.js encountered uncached data in generateMetadata().",
-             "environmentLabel": "Server",
-             "label": "Blocking Route",
-             "source": "app/dynamic-metadata-static-with-suspense/page.tsx (2:9) @ Module.generateMetadata
-           > 2 |   await new Promise((r) => setTimeout(r, 0))
-               |         ^",
-             "stack": [
-               "Module.generateMetadata app/dynamic-metadata-static-with-suspense/page.tsx (2:9)",
+               "description": "Next.js encountered uncached data in generateMetadata().",
+               "environmentLabel": "Server",
+               "label": "Blocking Route",
+               "source": "app/dynamic-metadata-static-with-suspense/page.tsx (2:9) @ Module.generateMetadata
+             > 2 |   await new Promise((r) => setTimeout(r, 0))
+                 |         ^",
+               "stack": [
+                 "Module.generateMetadata app/dynamic-metadata-static-with-suspense/page.tsx (2:9)",
                ],
              }
             `)
@@ -465,14 +465,14 @@ describe('Cache Components Errors', () => {
             await expect(browser).toDisplayCollapsedRedbox(`
              {
                "code": "E1370",
-             "description": "Next.js encountered uncached data in generateMetadata().",
-             "environmentLabel": "Server",
-             "label": "Blocking Route",
-             "source": "app/dynamic-metadata-static-with-suspense-above-body/page.tsx (2:9) @ Module.generateMetadata
-           > 2 |   await new Promise((r) => setTimeout(r, 0))
-               |         ^",
-             "stack": [
-               "Module.generateMetadata app/dynamic-metadata-static-with-suspense-above-body/page.tsx (2:9)",
+               "description": "Next.js encountered uncached data in generateMetadata().",
+               "environmentLabel": "Server",
+               "label": "Blocking Route",
+               "source": "app/dynamic-metadata-static-with-suspense-above-body/page.tsx (2:9) @ Module.generateMetadata
+             > 2 |   await new Promise((r) => setTimeout(r, 0))
+                 |         ^",
+               "stack": [
+                 "Module.generateMetadata app/dynamic-metadata-static-with-suspense-above-body/page.tsx (2:9)",
                ],
              }
             `)
@@ -557,14 +557,14 @@ describe('Cache Components Errors', () => {
             await expect(browser).toDisplayCollapsedRedbox(`
              {
                "code": "E1370",
-             "description": "Next.js encountered uncached data in generateMetadata().",
-             "environmentLabel": "Server",
-             "label": "Blocking Route",
-             "source": "app/dynamic-metadata-static-with-instant-false/page.tsx (4:9) @ Module.generateMetadata
-           > 4 |   await new Promise((r) => setTimeout(r, 0))
-               |         ^",
-             "stack": [
-               "Module.generateMetadata app/dynamic-metadata-static-with-instant-false/page.tsx (4:9)",
+               "description": "Next.js encountered uncached data in generateMetadata().",
+               "environmentLabel": "Server",
+               "label": "Blocking Route",
+               "source": "app/dynamic-metadata-static-with-instant-false/page.tsx (4:9) @ Module.generateMetadata
+             > 4 |   await new Promise((r) => setTimeout(r, 0))
+                 |         ^",
+               "stack": [
+                 "Module.generateMetadata app/dynamic-metadata-static-with-instant-false/page.tsx (4:9)",
                ],
              }
             `)
@@ -674,14 +674,14 @@ describe('Cache Components Errors', () => {
             await expect(browser).toDisplayCollapsedRedbox(`
              {
                "code": "E1369",
-             "description": "Next.js encountered uncached data in generateViewport().",
-             "environmentLabel": "Server",
-             "label": "Blocking Route",
-             "source": "app/dynamic-viewport-static-route/page.tsx (2:9) @ Module.generateViewport
-           > 2 |   await new Promise((r) => setTimeout(r, 0))
-               |         ^",
-             "stack": [
-               "Module.generateViewport app/dynamic-viewport-static-route/page.tsx (2:9)",
+               "description": "Next.js encountered uncached data in generateViewport().",
+               "environmentLabel": "Server",
+               "label": "Blocking Route",
+               "source": "app/dynamic-viewport-static-route/page.tsx (2:9) @ Module.generateViewport
+             > 2 |   await new Promise((r) => setTimeout(r, 0))
+                 |         ^",
+               "stack": [
+                 "Module.generateViewport app/dynamic-viewport-static-route/page.tsx (2:9)",
                ],
              }
             `)
@@ -804,14 +804,14 @@ describe('Cache Components Errors', () => {
             await expect(browser).toDisplayCollapsedRedbox(`
              {
                "code": "E1369",
-             "description": "Next.js encountered uncached data in generateViewport().",
-             "environmentLabel": "Server",
-             "label": "Blocking Route",
-             "source": "app/dynamic-viewport-dynamic-route/page.tsx (4:9) @ Module.generateViewport
-           > 4 |   await new Promise((r) => setTimeout(r, 0))
-               |         ^",
-             "stack": [
-               "Module.generateViewport app/dynamic-viewport-dynamic-route/page.tsx (4:9)",
+               "description": "Next.js encountered uncached data in generateViewport().",
+               "environmentLabel": "Server",
+               "label": "Blocking Route",
+               "source": "app/dynamic-viewport-dynamic-route/page.tsx (4:9) @ Module.generateViewport
+             > 4 |   await new Promise((r) => setTimeout(r, 0))
+                 |         ^",
+               "stack": [
+                 "Module.generateViewport app/dynamic-viewport-dynamic-route/page.tsx (4:9)",
                ],
              }
             `)
