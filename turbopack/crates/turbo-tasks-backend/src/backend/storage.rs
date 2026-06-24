@@ -379,26 +379,27 @@ impl Storage {
 
     /// Enter snapshot mode and return a guard that will call `end_snapshot` on drop.
     ///
-    /// Returns whether any shard has modifications. Per-shard counts are reset
-    /// in `take_snapshot` as each shard is processed, not here — resetting eagerly
+    /// Returns the total number of modified tasks across all shards. Per-shard counts are
+    /// reset in `take_snapshot` as each shard is processed, not here — resetting eagerly
     /// would lose track of modifications for shards that haven't been persisted yet.
     ///
     /// Safety invariant: `start_snapshot` and `end_snapshot` are always called
     /// sequentially within a single `snapshot_and_persist` invocation (the sole
     /// caller). There is no concurrent snapshot lifecycle, so they cannot race.
-    pub fn start_snapshot(&self) -> (SnapshotGuard<'_>, bool) {
+    pub fn start_snapshot(&self) -> (SnapshotGuard<'_>, u64) {
         // Enter snapshot mode first so concurrent track_modification calls switch
         // to the _during_snapshot path and stop incrementing shard_modified_counts.
         self.snapshot_mode.store(true, Ordering::Release);
-        // Check if any shard has modifications. Don't reset counts here —
+        // Sum the per-shard modified counts. Don't reset them here —
         // take_snapshot resets per-shard counts as it processes each shard,
         // which avoids losing track of modifications for shards that haven't
         // been persisted yet.
-        let has_modifications = self
+        let modified_count = self
             .shard_modified_counts
             .iter()
-            .any(|c| c.load(Ordering::Relaxed) > 0);
-        (SnapshotGuard::new(self), has_modifications)
+            .map(|c| c.load(Ordering::Relaxed))
+            .sum();
+        (SnapshotGuard::new(self), modified_count)
     }
 
     /// End snapshot mode.
@@ -1006,8 +1007,8 @@ mod tests {
         }
 
         // Step 2: enter snapshot mode.
-        let (snapshot_guard, has_modifications) = storage.start_snapshot();
-        assert!(has_modifications);
+        let (snapshot_guard, modified_count) = storage.start_snapshot();
+        assert!(modified_count > 0);
 
         // Step 3: `take_snapshot` scans the shard. At this point the task has
         // `any_modified()=true` and `any_modified_during_snapshot()=false`, so it
@@ -1045,9 +1046,9 @@ mod tests {
 
         // The during-snapshot modification must be reflected in shard_modified_counts so
         // the next snapshot cycle picks it up. Verify by starting another snapshot.
-        let (_guard2, has_modifications) = storage.start_snapshot();
+        let (_guard2, modified_count) = storage.start_snapshot();
         assert!(
-            has_modifications,
+            modified_count > 0,
             "shard_modified_counts must be non-zero after promoting modified_during_snapshot"
         );
     }
@@ -1080,8 +1081,8 @@ mod tests {
         }
 
         // Step 2: enter snapshot mode.
-        let (snapshot_guard, has_modifications) = storage.start_snapshot();
-        assert!(has_modifications);
+        let (snapshot_guard, modified_count) = storage.start_snapshot();
+        assert!(modified_count > 0);
 
         // Step 3: take_snapshot — task goes into modified list (meta_modified = true).
         let shards = storage.take_snapshot(snapshot_guard, &dummy_process, false);
@@ -1114,9 +1115,9 @@ mod tests {
         }
 
         // Next snapshot cycle must pick up the promoted data_modified.
-        let (_guard2, has_modifications) = storage.start_snapshot();
+        let (_guard2, modified_count) = storage.start_snapshot();
         assert!(
-            has_modifications,
+            modified_count > 0,
             "shard_modified_counts must be non-zero after promoting data_modified_during_snapshot"
         );
     }
@@ -1137,8 +1138,8 @@ mod tests {
         }
         assert!(storage.map.get(&task_id).is_some());
 
-        let (snapshot_guard, has_modifications) = storage.start_snapshot();
-        assert!(has_modifications);
+        let (snapshot_guard, modified_count) = storage.start_snapshot();
+        assert!(modified_count > 0);
 
         // Take the snapshot in drain mode.
         let shards = storage.take_snapshot(snapshot_guard, &dummy_process, true);
@@ -1180,8 +1181,8 @@ mod tests {
             .sum();
         assert!(grown_capacity >= task_ids.len());
 
-        let (snapshot_guard, has_modifications) = storage.start_snapshot();
-        assert!(has_modifications);
+        let (snapshot_guard, modified_count) = storage.start_snapshot();
+        assert!(modified_count > 0);
 
         let shards = storage.take_snapshot(snapshot_guard, &dummy_process, true);
         let items: Vec<_> = shards
@@ -1224,8 +1225,8 @@ mod tests {
         let _ = storage.access_mut(unmodified_id);
         assert!(storage.map.get(&unmodified_id).is_some());
 
-        let (snapshot_guard, has_modifications) = storage.start_snapshot();
-        assert!(has_modifications);
+        let (snapshot_guard, modified_count) = storage.start_snapshot();
+        assert!(modified_count > 0);
 
         let shards = storage.take_snapshot(snapshot_guard, &dummy_process, true);
 

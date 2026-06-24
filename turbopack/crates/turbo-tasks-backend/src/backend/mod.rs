@@ -96,6 +96,18 @@ static IDLE_TIMEOUT: LazyLock<Duration> = LazyLock::new(|| {
         .unwrap_or(Duration::from_secs(2))
 });
 
+/// Minimum number of modified tasks required before a periodic snapshot is worth
+/// persisting. The point of persistence is to save work on the next run; when only a
+/// handful of tasks changed there is little work to save, so the fixed snapshot/commit
+/// overhead isn't worth paying. Snapshots triggered by shutdown or tests ignore this
+/// threshold. Defaults to 1000; overridable via env var for testing.
+static MIN_SNAPSHOT_MODIFIED_TASKS: LazyLock<u64> = LazyLock::new(|| {
+    std::env::var("TURBO_ENGINE_SNAPSHOT_MIN_MODIFIED_TASKS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(1000)
+});
+
 /// Priority used to re-schedule a task that became stale during execution.
 ///
 /// Stale tasks must run again, but at a priority that reflects why they're being re-run rather
@@ -196,6 +208,13 @@ impl SnapshotReason {
     /// whole batch is written. This reduces peak memory during `next build` shutdown.
     fn drain_entries(self) -> bool {
         matches!(self, SnapshotReason::Stop)
+    }
+
+    /// Whether the minimum-modified-tasks threshold applies. Shutdown (`Stop`) must flush
+    /// whatever is pending regardless of size, and the test path must be deterministic, so
+    /// both bypass the threshold. Periodic/idle snapshots enforce it.
+    fn enforce_min_modified_threshold(self) -> bool {
+        !matches!(self, SnapshotReason::Stop | SnapshotReason::Test)
     }
 }
 
@@ -971,18 +990,28 @@ impl TurboTasksBackend {
             let _span = tracing::info_span!("blocking").entered();
             self.snapshot_coord.begin_snapshot()
         };
-        // Enter snapshot mode, which atomically reads and resets the modified count.
-        // Checking after start_snapshot ensures no concurrent increments can race.
-        let (snapshot_guard, has_modifications) = self.storage.start_snapshot();
+        // Enter snapshot mode and read the number of modified tasks.
+        // Reading after start_snapshot ensures no concurrent increments can race.
+        let (snapshot_guard, modified_count) = self.storage.start_snapshot();
 
         let suspended_operations = snapshot_phase.take_suspended_operations();
 
         let snapshot_time = Instant::now();
         drop(snapshot_phase);
 
-        if !has_modifications {
-            // No tasks modified since the last snapshot — drop the guard (which
-            // calls end_snapshot) and skip the expensive O(N) scan.
+        // Persistence exists to save work on the next run. When few tasks changed there is
+        // little work to save, so the fixed snapshot/commit overhead isn't worth paying.
+        // Skip below the threshold. Shutdown and tests bypass it (threshold of 1, i.e. only
+        // skip when there is literally nothing to persist).
+        let threshold = if reason.enforce_min_modified_threshold() {
+            *MIN_SNAPSHOT_MODIFIED_TASKS
+        } else {
+            1
+        };
+        if modified_count < threshold {
+            // Not enough tasks modified since the last snapshot — drop the guard (which
+            // calls end_snapshot) and skip the expensive O(N) scan. The modifications stay
+            // tracked in shard_modified_counts for a future snapshot.
             drop(snapshot_guard);
             return Ok((start, false));
         }
