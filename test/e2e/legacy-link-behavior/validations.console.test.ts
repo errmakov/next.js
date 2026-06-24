@@ -1,5 +1,6 @@
 import { isNextDev, nextTestSetup } from 'e2e-utils'
 import { waitForNoRedbox } from 'next-test-utils'
+import { prerenderOrShell } from 'e2e-utils/instant-validation'
 
 const appShellsEnabled = !!process.env.NEXT_TEST_ENABLE_APP_SHELLS
 
@@ -30,12 +31,13 @@ describe('Validations for <Link legacyBehavior>', () => {
         )
 
         if (isNextDev) {
-          await expect(browser).toDisplayCollapsedRedbox(`
+          await expect(browser).toDisplayCollapsedRedbox(
+            `
            [
              {
                "code": "E394",
                "description": "Using a Server Component as a direct child of \`<Link legacyBehavior>\` is not supported. If you need legacyBehavior, wrap your Server Component in a Client Component that renders the Link's \`<a>\` tag.",
-               "environmentLabel": "Prerender",
+               "environmentLabel": "<Prerender or Shell, depending on appShells>",
                "label": "Console Error",
                "source": "app/validations/rsc-that-renders-link/synchronous/page.tsx (7:7) @ Page
            >  7 |       <Link href="/about" legacyBehavior>
@@ -61,7 +63,10 @@ describe('Validations for <Link legacyBehavior>', () => {
                ],
              },
            ]
-          `)
+          `,
+
+            { transformEnvironmentLabel: prerenderOrShell(appShellsEnabled) }
+          )
         } else {
           expect(newConsoleOutput()).toMatchInlineSnapshot(`
            "Using a Server Component as a direct child of \`<Link legacyBehavior>\` is not supported. If you need legacyBehavior, wrap your Server Component in a Client Component that renders the Link's \`<a>\` tag.
@@ -76,12 +81,13 @@ describe('Validations for <Link legacyBehavior>', () => {
         )
 
         if (isNextDev) {
-          await expect(browser).toDisplayRedbox(`
+          await expect(browser).toDisplayRedbox(
+            `
            [
              {
                "code": "E394",
                "description": "Using a Server Component as a direct child of \`<Link legacyBehavior>\` is not supported. If you need legacyBehavior, wrap your Server Component in a Client Component that renders the Link's \`<a>\` tag.",
-               "environmentLabel": "Prerender",
+               "environmentLabel": "<Prerender or Shell, depending on appShells>",
                "label": "Console Error",
                "source": "app/validations/rsc-that-renders-link/asynchronous/page.tsx (7:7) @ Page
            >  7 |       <Link href="/about" legacyBehavior>
@@ -103,7 +109,10 @@ describe('Validations for <Link legacyBehavior>', () => {
                ],
              },
            ]
-          `)
+          `,
+
+            { transformEnvironmentLabel: prerenderOrShell(appShellsEnabled) }
+          )
         } else {
           const output = getContentBetween({
             input: newConsoleOutput(),
@@ -147,12 +156,13 @@ describe('Validations for <Link legacyBehavior>', () => {
         )
 
         if (isNextDev) {
-          await expect(browser).toDisplayRedbox(`
+          await expect(browser).toDisplayRedbox(
+            `
            [
              {
                "code": "E394",
                "description": "Using a Lazy Component as a direct child of \`<Link legacyBehavior>\` from a Server Component is not supported. If you need legacyBehavior, wrap your Lazy Component in a Client Component that renders the Link's \`<a>\` tag.",
-               "environmentLabel": "Prerender",
+               "environmentLabel": "<Prerender or Shell, depending on appShells>",
                "label": "Console Error",
                "source": "app/validations/rsc-that-renders-link/lazy/page.tsx (9:7) @ Page
            >  9 |       <Link href="/about" legacyBehavior passHref>
@@ -174,7 +184,10 @@ describe('Validations for <Link legacyBehavior>', () => {
                ],
              },
            ]
-          `)
+          `,
+
+            { transformEnvironmentLabel: prerenderOrShell(appShellsEnabled) }
+          )
         } else {
           const output = getContentBetween({
             input: newConsoleOutput(),
