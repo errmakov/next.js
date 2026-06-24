@@ -13,6 +13,7 @@ async function getCachedValue() {
 async function ParamsData({ params }: { params: Promise<{ id: string }> }) {
   // Awaiting params (without generateStaticParams) is what defers the cache
   // read past the static shell.
+  // TODO(app-shells): link data behaves differently now
   await params
   const value = await getCachedValue()
   return <p id="params">{value}</p>
