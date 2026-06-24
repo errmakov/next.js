@@ -8,6 +8,9 @@ import { retry, waitFor } from 'next-test-utils'
     'ENABLE_CACHING=1',
     'TURBO_ENGINE_IGNORE_DIRTY=1',
     'TURBO_ENGINE_SNAPSHOT_IDLE_TIMEOUT_MILLIS=1000',
+    // Persist even tiny snapshots so the test doesn't depend on the
+    // minimum-modified-tasks threshold.
+    'TURBO_ENGINE_SNAPSHOT_MIN_MODIFIED_TASKS=0',
     'ENABLE_EVICTION=1',
   ].join(' ')
 

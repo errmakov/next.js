@@ -42,6 +42,9 @@ for (const cacheEnabled of [false, true]) {
       `TURBO_ENGINE_IGNORE_DIRTY=1`,
       // decrease the idle timeout to make the test more reliable
       `TURBO_ENGINE_SNAPSHOT_IDLE_TIMEOUT_MILLIS=1000`,
+      // persist even tiny snapshots so the test doesn't depend on the
+      // minimum-modified-tasks threshold
+      `TURBO_ENGINE_SNAPSHOT_MIN_MODIFIED_TASKS=0`,
     ].join(' ')
 
     const { skipped, next, isTurbopack } = nextTestSetup({

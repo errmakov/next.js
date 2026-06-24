@@ -1000,18 +1000,14 @@ impl TurboTasksBackend {
         drop(snapshot_phase);
 
         // Persistence exists to save work on the next run. When few tasks changed there is
-        // little work to save, so the fixed snapshot/commit overhead isn't worth paying.
-        // Skip below the threshold. Shutdown and tests bypass it (threshold of 1, i.e. only
-        // skip when there is literally nothing to persist).
+        // little work to save, so don't bother. Shutdown and tests bypass it (threshold of 1, i.e.
+        // only skip when there is literally nothing to persist).
         let threshold = if reason.enforce_min_modified_threshold() {
             *MIN_SNAPSHOT_MODIFIED_TASKS
         } else {
             1
         };
         if modified_count < threshold {
-            // Not enough tasks modified since the last snapshot — drop the guard (which
-            // calls end_snapshot) and skip the expensive O(N) scan. The modifications stay
-            // tracked in shard_modified_counts for a future snapshot.
             drop(snapshot_guard);
             return Ok((start, false));
         }
