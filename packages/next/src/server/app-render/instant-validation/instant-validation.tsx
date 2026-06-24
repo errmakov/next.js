@@ -193,6 +193,7 @@ function stringifySegment(segment: Segment): SegmentPath {
 
 export type SegmentStage =
   | RenderStage.Static
+  | RenderStage.ShellRuntime
   | RenderStage.Runtime
   | RenderStage.Dynamic
 
@@ -201,6 +202,7 @@ type PrefetchedSegmentStage = Exclude<SegmentStage, RenderStage.Dynamic>
 
 const SEGMENT_STAGE_ORDER = [
   RenderStage.Static,
+  RenderStage.ShellRuntime,
   RenderStage.Runtime,
   RenderStage.Dynamic,
 ] as const satisfies readonly SegmentStage[]
@@ -252,6 +254,7 @@ export async function collectStagedSegmentData(
     switch (currentStage) {
       case RenderStage.Static:
         return 'Prerender'
+      case RenderStage.ShellRuntime: // TODO(app-shells) - proper environmentName
       case RenderStage.Runtime:
         return hasRuntimePrefetch ? 'Prefetch' : 'Prefetchable'
       case RenderStage.Dynamic:
@@ -300,6 +303,7 @@ export async function collectStagedSegmentData(
   /** Track when we advance stages so we can pass them as `endTime` later. */
   const stageEndTimes: StageEndTimes = {
     [RenderStage.Static]: Infinity,
+    [RenderStage.ShellRuntime]: Infinity,
     [RenderStage.Runtime]: Infinity,
   }
 
@@ -394,6 +398,7 @@ export async function collectStagedSegmentData(
         pendingTasks.push(renderIntoCacheItem(segmentData, segmentCacheItem))
       }
     },
+    () => advanceStage(RenderStage.ShellRuntime),
     () => advanceStage(RenderStage.Runtime),
     () => advanceStage(RenderStage.Dynamic)
   )
@@ -448,8 +453,6 @@ function createStagedStreamFromChunks(stageChunks: StageChunks) {
   ): boolean {
     if (closed) return true
 
-    // NOTE: we don't special handling for skipping stages,
-    // emitNewChunks will emit anything that hasn't been emitted before.
     currentStage = stage
     emitNewChunks(stageChunks[stage])
 
@@ -740,6 +743,7 @@ function createSegmentCacheItem(withDebugChunks: boolean): SegmentCacheItem {
   return {
     chunks: {
       [RenderStage.Static]: [],
+      [RenderStage.ShellRuntime]: [],
       [RenderStage.Runtime]: [],
       [RenderStage.Dynamic]: [],
     },
@@ -906,7 +910,16 @@ export type ValidationPayloadResult = {
   slotStacks: Array<(() => Error) | null>
 }
 
+export enum SimulatedPrefetchKind {
+  Shell = 1,
+  /** App Shells, for `<Link prefetch={true}>` */
+  Speculative = 2,
+  /** Pre-appShells behavior. */
+  LegacySpeculative = 3,
+}
+
 export async function createCombinedPayloadAtDepth(
+  prefetchKind: SimulatedPrefetchKind,
   initialRSCPayload: InitialRSCPayload,
   cache: SegmentCache,
   initialLoaderTree: LoaderTree,
@@ -928,8 +941,10 @@ export async function createCombinedPayloadAtDepth(
   }
   const { validationLevel, route } = workStore
 
+  let hasShellSegments = false
   let hasStaticSegments = false
   let hasRuntimeSegments = false
+
   // Index 0 is reserved for the root config. Slot markers start at 1.
   const slotStacks: Array<(() => Error) | null> = [null]
 
@@ -1197,34 +1212,80 @@ export async function createCombinedPayloadAtDepth(
       }
     }
 
-    const segmentHasRuntimePrefetch = prefetchConfig === 'allow-runtime'
-
-    let childIsInsideRuntimePrefetch = isInsideRuntimePrefetch
-    let stage: SegmentStage
-    if (!isInsideRuntimePrefetch) {
-      if (segmentHasRuntimePrefetch) {
-        stage = RenderStage.Runtime
-        childIsInsideRuntimePrefetch = true
-        hasRuntimeSegments = true
-      } else {
-        if (useRuntimeStageForPartialSegments) {
-          stage = RenderStage.Runtime
-          hasRuntimeSegments = true
-        } else {
-          stage = RenderStage.Static
-          hasStaticSegments = true
-        }
-      }
-    } else {
-      stage = RenderStage.Runtime
-      hasRuntimeSegments = true
-    }
-
-    debug?.(`    ${path || '/'} - ${RenderStage[stage]}`)
     const segmentCacheItem = cache.segments.get(path)
     if (!segmentCacheItem) {
       throw new InvariantError(`Missing segment data: ${path}`)
     }
+
+    let stage: PrefetchedSegmentStage
+    let childIsInsideRuntimePrefetch = isInsideRuntimePrefetch
+
+    switch (prefetchKind) {
+      case SimulatedPrefetchKind.Shell: {
+        if (useRuntimeStageForPartialSegments) {
+          stage = RenderStage.Runtime
+        } else {
+          stage = RenderStage.ShellRuntime
+        }
+        // We do not set or track
+        // - `[child]isInsideRuntimePrefetch`
+        // - `has{Static,Runtime}Segments`
+        // because they do not affect shell prefetches.
+        break
+      }
+      case SimulatedPrefetchKind.Speculative:
+      case SimulatedPrefetchKind.LegacySpeculative: {
+        const segmentHasRuntimePrefetch = prefetchConfig === 'allow-runtime'
+
+        if (!isInsideRuntimePrefetch) {
+          if (segmentHasRuntimePrefetch) {
+            stage = RenderStage.Runtime
+            childIsInsideRuntimePrefetch = true
+          } else {
+            if (useRuntimeStageForPartialSegments) {
+              stage = RenderStage.Runtime
+            } else {
+              switch (prefetchKind) {
+                case SimulatedPrefetchKind.Speculative: {
+                  // App Shells speculative prefetch of a non-"allow-runtime" segment.
+                  // TODO(app-shells): This is not the actual router behavior.
+                  // For now, we just assume that the prefetch is skipped.
+                  // We should check
+                  // - is the segment fully static? (safe to prefetch, not worse than shell)
+                  // - does the shell shell use session data but the page isn't allow-runtime?
+                  stage = RenderStage.ShellRuntime
+                  break
+                }
+                case SimulatedPrefetchKind.LegacySpeculative: {
+                  // In legacy speculative prefetches, we always use static
+                  // for segments that aren't under an allow-runtime boundary.
+                  stage = RenderStage.Static
+                }
+              }
+            }
+          }
+        } else {
+          stage = RenderStage.Runtime
+        }
+        break
+      }
+    }
+
+    switch (stage) {
+      case RenderStage.Static: {
+        hasStaticSegments = true
+        break
+      }
+      case RenderStage.ShellRuntime: {
+        hasShellSegments = true
+        break
+      }
+      case RenderStage.Runtime: {
+        hasRuntimeSegments = true
+      }
+    }
+
+    debug?.(`    ${path || '/'} - ${RenderStage[stage]}`)
 
     const segmentData = await deserializeFromChunks<SegmentData>(
       segmentCacheItem.chunks[stage],
@@ -1326,9 +1387,53 @@ export async function createCombinedPayloadAtDepth(
 
   const { flightRouterState } = getRootDataFromPayload(initialRSCPayload)
 
-  const headStage = hasRuntimeSegments
-    ? RenderStage.Runtime
-    : RenderStage.Static
+  let headStage: PrefetchedSegmentStage
+  switch (prefetchKind) {
+    case SimulatedPrefetchKind.Shell: {
+      if (useRuntimeStageForPartialSegments) {
+        headStage = RenderStage.Runtime
+      } else {
+        headStage = RenderStage.ShellRuntime
+      }
+      break
+    }
+    case SimulatedPrefetchKind.Speculative: {
+      // TODO(app-shells): Simulating skipping of prefetches if there's no "allow-runtime".
+      // Similarly to buildNewTreeSeedData, this does not currently account for fully
+      // static generateMetadata that uses generateStaticParams (and thus is partial in ShellRuntime)
+      headStage = hasRuntimeSegments
+        ? RenderStage.Runtime
+        : RenderStage.ShellRuntime
+      break
+    }
+    case SimulatedPrefetchKind.LegacySpeculative: {
+      headStage = hasRuntimeSegments ? RenderStage.Runtime : RenderStage.Static
+      break
+    }
+  }
+  debug?.(`    /_head - ${RenderStage[headStage]}`)
+
+  let hasAmbiguousErrors: boolean
+  switch (prefetchKind) {
+    case SimulatedPrefetchKind.Shell: {
+      // In a shell prefetch, holes are always ambiguous
+      // (they can be either link data or dynamic data)
+      // unless we're already overriding and using the runtime stage,
+      // which resolves link data.
+      hasAmbiguousErrors = !useRuntimeStageForPartialSegments
+      break
+    }
+    case SimulatedPrefetchKind.Speculative: {
+      hasAmbiguousErrors = hasStaticSegments || hasShellSegments
+      break
+    }
+    case SimulatedPrefetchKind.LegacySpeculative: {
+      // In the old prefetching mechanism, holes in static segments are ambiguous
+      // (they can be either runtime data or dynamic data).
+      hasAmbiguousErrors = hasStaticSegments
+      break
+    }
+  }
 
   const head = await createValidationHead(
     cache,
@@ -1345,7 +1450,7 @@ export async function createCombinedPayloadAtDepth(
 
   return {
     payload,
-    hasAmbiguousErrors: hasStaticSegments,
+    hasAmbiguousErrors,
     slotStacks,
   }
 }
